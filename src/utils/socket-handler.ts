@@ -1,9 +1,3 @@
-// ============================================
-// BACKEND SOCKET.IO SERVER CONFIGURATION
-// Runs on: http://localhost:3000
-// Accepts connections from: Frontend on http://localhost:3001
-// ============================================
-
 import type { Server as HTTPServer } from "http";
 import { Server as SocketIOServer, type Socket } from "socket.io";
 
