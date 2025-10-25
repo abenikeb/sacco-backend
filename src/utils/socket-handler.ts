@@ -15,13 +15,10 @@ export const initializeSocket = (httpServer: HTTPServer) => {
 	});
 
 	io.on("connection", (socket: Socket) => {
-		console.log(
-			"[v0] Backend: New socket connection from frontend:",
-			socket.id
-		);
+		console.log("Backend: New socket connection from frontend:", socket.id);
 
 		socket.on("user:join", (userId: number) => {
-			console.log(`[v0] Backend: User ${userId} joined notifications`);
+			console.log(`Backend: User ${userId} joined notifications`);
 			if (!userSockets.has(userId)) {
 				userSockets.set(userId, new Set());
 			}
@@ -30,7 +27,7 @@ export const initializeSocket = (httpServer: HTTPServer) => {
 		});
 
 		socket.on("disconnect", () => {
-			console.log("[v0] Backend: Socket disconnected:", socket.id);
+			console.log("Backend: Socket disconnected:", socket.id);
 			userSockets.forEach((sockets) => {
 				sockets.delete(socket.id);
 			});
