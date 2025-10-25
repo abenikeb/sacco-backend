@@ -1,9 +1,3 @@
-// ============================================
-// BACKEND SOCKET.IO SERVER CONFIGURATION
-// Runs on: http://localhost:3000
-// Accepts connections from: Frontend on http://localhost:3001
-// ============================================
-
 import type { Server as HTTPServer } from "http";
 import { Server as SocketIOServer, type Socket } from "socket.io";
 
@@ -51,12 +45,12 @@ export const broadcastNotification = async (
 	notification: any
 ) => {
 	if (!io) {
-		console.error("[v0] Backend: Socket.IO not initialized");
+		console.error("Backend: Socket.IO not initialized");
 		return;
 	}
 
 	console.log(
-		`[v0] Backend: Broadcasting notification to user ${userId}:`,
+		`Backend: Broadcasting notification to user ${userId}:`,
 		notification
 	);
 	io.to(`user:${userId}`).emit("notification:new", notification);

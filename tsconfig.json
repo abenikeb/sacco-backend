@@ -14,7 +14,7 @@
 		"resolveJsonModule": true,
 
 		/* === Project Structure === */
-		"rootDir": "src",
+		"rootDir": ".",
 		"outDir": "dist",
 		"baseUrl": "./",
 
@@ -54,7 +54,7 @@
 		"moduleDetection": "force",
 
 		/* === Imports === */
-		"allowImportingTsExtensions": true,
+		// "allowImportingTsExtensions": true,
 		"noUncheckedSideEffectImports": true
 	},
 

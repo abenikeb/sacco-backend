@@ -44,18 +44,32 @@ export async function getSession(req: Request): Promise<JWTPayload | null> {
 }
 
 export function setAuthCookie(token: string, res: Response): Response {
-	res.setHeader(
+	const isProduction = process.env.NODE_ENV === "production";
+
+	return res.setHeader(
 		"Set-Cookie",
 		cookie.serialize("token", token, {
 			httpOnly: true,
 			path: "/",
-			maxAge: 60 * 60 * 24,
-			sameSite: "none",
-			secure: true,
+			maxAge: 60 * 60 * 24, // 1 day
+			sameSite: "lax", // 'none' only for HTTPS
+			secure: false, // must be true only in HTTPS
 		})
 	);
-	return res;
 }
+ 
+// export function setAuthCookie(token: string, res: Response): Response {
+// 	return res.setHeader(
+// 		"Set-Cookie",
+// 		cookie.serialize("token", token, {
+// 			httpOnly: true,
+// 			path: "/",
+// 			maxAge: 60 * 60 * 24,
+// 			sameSite: "none",
+// 			secure: false,
+// 		})
+// 	);
+// }
 
 export function removeAuthCookie(res: Response): Response {
 	const serializedCookie = cookie.serialize("token", "", {
