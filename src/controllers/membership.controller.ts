@@ -69,59 +69,27 @@ membershipRouter.post(
 		}
 	}
 );
-membershipRouter.get("/requests", async (req, res) => {
-	const session = await getSession(req);
-	if (!session || session.role === "MEMBER" || session.role === "COMMITTEE") {
-		return res.status(401).json({ error: "Unauthorized" });
-	}
-	const userRole = session.role;
 
-	try {
-		if (userRole == "ACCOUNTANT") {
-			const requests = await prisma.membershipRequest.findMany({
-				where: {
-					approvalOrder: 0,
-				},
-				orderBy: { createdAt: "desc" },
-			});
-			return res.json(requests);
-		} else if (userRole == "SUPERVISOR") {
-			const requests = await prisma.membershipRequest.findMany({
-				where: {
-					approvalOrder: 1,
-				},
-				orderBy: { createdAt: "desc" },
-			});
-			return res.json(requests);
-		} else if (userRole == "MANAGER") {
-			const requests = await prisma.membershipRequest.findMany({
-				where: {
-					approvalOrder: 2,
-				},
-				orderBy: { createdAt: "desc" },
-			});
-			return res.json(requests);
-		}
-	} catch (error) {
-		console.error("Error fetching membership requests:", error);
-		return res
-			.status(500)
-			.json({ error: "Failed to fetch membership requests" });
-	}
-});
 membershipRouter.patch("/requests/:id", async (req, res) => {
+	console.log("MEMBERSHIP REQUEST APPLYING...");
+
 	const session = await getSession(req);
 	// if (!session || !["SUPERVISOR", "MANAGER"].includes(session.role)) { // I NEED TO CHECK THIS LATER ON
 	// 	return res.status(401).json({ error: "Unauthorized" });
 	// }
-	if (!session || session.role === "MEMBER" || session.role === "COMMITTEE") {
-		return res.status(401).json({ error: "Unauthorized" });
-	}
+	// if (!session || session.role === "MEMBER" || session.role === "COMMITTEE") {
+	// 	return res.status(401).json({ error: "Unauthorized" });
+	// }
 	try {
 		const { status } = req.body;
 		const id = Number.parseInt(req.params.id);
 		const userRole = session.role;
 		const currIndex = APPROVAL_HIERARCHY.findIndex((val) => val === userRole);
+
+		console.log({
+			userRole,
+			currIndex,
+		});
 
 		const updatedRequest = await prisma.membershipRequest.update({
 			where: { id },
@@ -129,6 +97,31 @@ membershipRouter.patch("/requests/:id", async (req, res) => {
 				status,
 				approvalOrder: currIndex + 1,
 			},
+		});
+
+		console.log({
+			updatedRequest,
+		});
+
+		const etNumber = updatedRequest.etNumber;
+		const memberNumber = await generateUniqueNumber("memberNumber");
+
+		// Create a new Member record
+		const newMember = await prisma.member.create({
+			data: {
+				name: updatedRequest.name,
+				salary: updatedRequest.salary,
+				email: updatedRequest.email,
+				phone: updatedRequest.phone,
+				etNumber,
+				memberNumber,
+				department: updatedRequest.department,
+				// userId: user.id,
+			},
+		});
+
+		console.log({
+			newMember,
 		});
 		if (currIndex + 1 === APPROVAL_HIERARCHY.length) {
 			// Get the membership request details
@@ -199,4 +192,46 @@ membershipRouter.patch("/requests/:id", async (req, res) => {
 		});
 	}
 });
+
+membershipRouter.get("/requests", async (req, res) => {
+	const session = await getSession(req);
+	if (!session || session.role === "MEMBER" || session.role === "COMMITTEE") {
+		return res.status(401).json({ error: "Unauthorized" });
+	}
+	const userRole = session.role;
+
+	try {
+		if (userRole == "ACCOUNTANT") {
+			const requests = await prisma.membershipRequest.findMany({
+				where: {
+					approvalOrder: 0,
+				},
+				orderBy: { createdAt: "desc" },
+			});
+			return res.json(requests);
+		} else if (userRole == "SUPERVISOR") {
+			const requests = await prisma.membershipRequest.findMany({
+				where: {
+					approvalOrder: 1,
+				},
+				orderBy: { createdAt: "desc" },
+			});
+			return res.json(requests);
+		} else if (userRole == "MANAGER") {
+			const requests = await prisma.membershipRequest.findMany({
+				where: {
+					approvalOrder: 2,
+				},
+				orderBy: { createdAt: "desc" },
+			});
+			return res.json(requests);
+		}
+	} catch (error) {
+		console.error("Error fetching membership requests:", error);
+		return res
+			.status(500)
+			.json({ error: "Failed to fetch membership requests" });
+	}
+});
+
 export default membershipRouter;

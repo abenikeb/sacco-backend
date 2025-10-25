@@ -54,7 +54,7 @@
 		"moduleDetection": "force",
 
 		/* === Imports === */
-		"allowImportingTsExtensions": true,
+		// "allowImportingTsExtensions": true,
 		"noUncheckedSideEffectImports": true
 	},
 
