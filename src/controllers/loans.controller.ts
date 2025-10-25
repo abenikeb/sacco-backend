@@ -1,72 +1,187 @@
-import express from 'express'
-import { prisma } from '../config/prisma.js';
-import { getSession } from './auth/auth.js';
-import { LoanApprovalLog, Prisma,  LoanApprovalStatus, UserRole} from '@prisma/client';
-import { sendNotification } from './notification/notification.controller.js';
-import fs  from "fs";
-import { mkdir, readFile, writeFile } from 'fs/promises';
+import express from "express";
+import { prisma } from "../config/prisma";
+import { getSession } from "./auth/auth";
+import {
+	LoanApprovalLog,
+	Prisma,
+	LoanApprovalStatus,
+	UserRole,
+	TransactionType,
+} from "@prisma/client";
+import { sendNotification } from "./notification/notification.controller";
+import fs from "fs";
+import { mkdir, readFile, writeFile } from "fs/promises";
 import path from "path";
-import multer from 'multer'
-import { calculateLoan } from '../utils/calculate.js';
-import mime from 'mime-types';
-import { getContentType } from '../utils/getContentType.js';
-import { createLoanRepayments } from '../utils/calculateLoanRepayment.js';
-
+import multer from "multer";
+import { calculateLoan } from "../utils/calculate";
+import mime from "mime-types";
+import { getContentType } from "../utils/getContentType";
+import { createLoanRepayments } from "../utils/calculateLoanRepayment";
 
 const loansRouter = express.Router();
-const APPROVAL_HIERARCHY: UserRole[] = [UserRole.ACCOUNTANT,  UserRole.SUPERVISOR, UserRole.MANAGER, UserRole.COMMITTEE];
+const APPROVAL_HIERARCHY: UserRole[] = [
+	UserRole.ACCOUNTANT,
+	UserRole.SUPERVISOR,
+	UserRole.MANAGER,
+	UserRole.COMMITTEE,
+];
 const order = new Map<UserRole, number>([
-  [UserRole.ACCOUNTANT, 0],
-  [UserRole.SUPERVISOR, 1],
-  [UserRole.MANAGER, 2],
-  [UserRole.COMMITTEE, 3],
+	[UserRole.ACCOUNTANT, 0],
+	[UserRole.SUPERVISOR, 1],
+	[UserRole.MANAGER, 2],
+	[UserRole.COMMITTEE, 3],
 ]);
-const MIN_COMMITTEE_APPROVAL = 2;
-const upload = multer(); 
+const MIN_COMMITTEE_APPROVAL = 1;
+const upload = multer();
 
+async function calculateTotalSavings(memberId: number): Promise<number> {
+	const savingsTransactions = await prisma.transaction.findMany({
+		where: {
+			memberId,
+			type: {
+				in: [
+					TransactionType.SAVINGS,
+					TransactionType.MEMBERSHIP_FEE,
+					TransactionType.REGISTRATION_FEE,
+					TransactionType.COST_OF_SHARE,
+					TransactionType.WILLING_DEPOSIT,
+				],
+			},
+		},
+	});
+	return savingsTransactions.reduce((sum, tx) => sum + Number(tx.amount), 0);
+}
 
-loansRouter.get('/', async (req, res) => {
-  const session = await getSession(req);
-  if (!session || session.role === "MEMBER") {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
+async function calculateTotalContributions(memberId: number): Promise<number> {
+	const contributionTransactions = await prisma.transaction.findMany({
+		where: {
+			memberId,
+			type: {
+				in: [
+					TransactionType.MEMBERSHIP_FEE,
+					TransactionType.REGISTRATION_FEE,
+					TransactionType.COST_OF_SHARE,
+				],
+			},
+		},
+	});
+	return contributionTransactions.reduce(
+		(sum, tx) => sum + Number(tx.amount),
+		0
+	);
+}
 
-  const userRole = session.role;
-  const searchTerm = (req.query.search || "").toString();
-  const status = req.query.status?.toString();
-  const sortBy = req.query.sortBy?.toString() || "createdAt";
-  const sortOrder = (req.query.sortOrder?.toString() === "asc" ? "asc" : "desc") as "asc" | "desc";
+async function getActiveLoanBalance(memberId: number) {
+	const activeLoan = await prisma.loan.findFirst({
+		where: {
+			memberId,
+			status: {
+				in: ["APPROVED", "DISBURSED"],
+			},
+		},
+		include: {
+			loanRepayments: true,
+		},
+	});
 
-  const loanId = Number(searchTerm);
-  const idFilter = !isNaN(loanId) ? { id: { equals: loanId } } : undefined;
-  
-  try {
-    const loans = await prisma.loan.findMany({
-      where: {
-        order: order.get(userRole)!,
-        OR: [
-          { member: { name: { contains: searchTerm, mode: "insensitive" } } },
-          idFilter,
-        ].filter(Boolean) as any[],
-      },
-      include: {
-        member: { select: { name: true } },
-        approvalLogs: true,
-      },
-      orderBy: { [sortBy]: sortOrder },
-    });
+	if (!activeLoan) {
+		return null;
+	}
 
-    return res.status(200).json(loans);
-  } catch (error) {
-    console.log(error);
-    return res.status(500).json({ error: "Internal Server Error" });
-  }
+	const totalRepaid = activeLoan.loanRepayments.reduce(
+		(sum, repayment) => sum + Number(repayment.paidAmount || 0),
+		0
+	);
+	const remainingBalance = Number(activeLoan.amount) - totalRepaid;
+
+	return {
+		loanId: activeLoan.id,
+		totalDisbursed: Number(activeLoan.amount),
+		totalRepaid,
+		remainingBalance,
+		status: activeLoan.status,
+	};
+}
+
+// Helper function to get the next approver in the hierarchy
+async function getNextApproverUserId(
+	currentRoleIndex: number
+): Promise<number | null> {
+	if (currentRoleIndex >= APPROVAL_HIERARCHY.length - 1) {
+		return null; // No next approver
+	}
+
+	const nextRole = APPROVAL_HIERARCHY[currentRoleIndex + 1];
+	const nextApprover = await prisma.user.findFirst({
+		where: { role: nextRole },
+	});
+
+	return nextApprover?.id || null;
+}
+
+// Helper function to get first approver (ACCOUNTANT)
+async function getFirstApproverUserId(): Promise<number | null> {
+	const firstApprover = await prisma.user.findFirst({
+		where: { role: UserRole.ACCOUNTANT },
+	});
+
+	return firstApprover?.id || null;
+}
+
+function calculateMonthlyPayment(
+	principal: number,
+	annualRate: number,
+	months: number
+): number {
+	const monthlyRate = annualRate / 100 / 12;
+	if (monthlyRate === 0) return principal / months;
+	return (
+		(principal * monthlyRate * Math.pow(1 + monthlyRate, months)) /
+		(Math.pow(1 + monthlyRate, months) - 1)
+	);
+}
+
+loansRouter.get("/", async (req, res) => {
+	const session = await getSession(req);
+	if (!session || session.role === "MEMBER") {
+		return res.status(401).json({ error: "Unauthorized" });
+	}
+
+	const userRole = session.role;
+	const searchTerm = (req.query.search || "").toString();
+	const status = req.query.status?.toString();
+	const sortBy = req.query.sortBy?.toString() || "createdAt";
+	const sortOrder = (
+		req.query.sortOrder?.toString() === "asc" ? "asc" : "desc"
+	) as "asc" | "desc";
+
+	const loanId = Number(searchTerm);
+	const idFilter = !isNaN(loanId) ? { id: { equals: loanId } } : undefined;
+
+	try {
+		const loans = await prisma.loan.findMany({
+			where: {
+				order: order.get(userRole)!,
+				OR: [
+					{ member: { name: { contains: searchTerm, mode: "insensitive" } } },
+					idFilter,
+				].filter(Boolean) as any[],
+			},
+			include: {
+				member: { select: { name: true } },
+				approvalLogs: true,
+			},
+			orderBy: { [sortBy]: sortOrder },
+		});
+
+		return res.status(200).json(loans);
+	} catch (error) {
+		console.log(error);
+		return res.status(500).json({ error: "Internal Server Error" });
+	}
 });
 
-
-
-loansRouter.get('/agreement-template', async(req, res) => {
-	
+loansRouter.get("/agreement-template", async (req, res) => {
 	const session = await getSession(req);
 	if (!session || session.role !== "MEMBER") {
 		return res.status(401).json({ error: "Unauthorized" });
@@ -85,23 +200,20 @@ loansRouter.get('/agreement-template', async(req, res) => {
 			"attachment; filename=loan_agreement_template.pdf"
 		);
 		res.send(fileBuffer);
+	} catch (error) {
+		console.error("Error serving loan agreement template:", error);
+		return res
+			.status(500)
+			.json({ error: "Failed to serve loan agreement template" });
 	}
-		catch(error) {
-			console.error("Error serving loan agreement template:", error);
-		return res.status(500).json(
-			{ error: "Failed to serve loan agreement template" },
-			
-		);
-		}
 });
-loansRouter.get('/approval-history', async(req, res) => {
 
+loansRouter.get("/approval-history", async (req, res) => {
 	const session = await getSession(req);
 	if (!session || session.role === "MEMBER") {
-		
 		return res.status(401).json({ error: "Unauthorized" });
 	}
-	const search =( req.query.search || "").toString();
+	const search = (req.query.search || "").toString();
 	const status = req.query.status || "ALL";
 	const fromDate = req.query.fromDate;
 	const toDate = req.query.toDate;
@@ -110,7 +222,9 @@ loansRouter.get('/approval-history', async(req, res) => {
 	try {
 		const where: Prisma.LoanApprovalLogWhereInput = {
 			OR: [
-				...(Number.isFinite(Number.parseInt(search)) ? [{ loan: { id: Number.parseInt(search) } }] : []),
+				...(Number.isFinite(Number.parseInt(search))
+					? [{ loan: { id: Number.parseInt(search) } }]
+					: []),
 				{
 					loan: { member: { name: { contains: search, mode: "insensitive" } } },
 				},
@@ -175,19 +289,13 @@ loansRouter.get('/approval-history', async(req, res) => {
 			totalCount,
 			totalPages: Math.ceil(totalCount / pageSize),
 		});
-
-
-
+	} catch (error) {
+		console.error("Error fetching approval history:", error);
+		return res.status(500).json({ error: "Failed to fetch approval history" });
 	}
-	catch(error){
-	console.error("Error fetching approval history:", error);
-			return res.status(500).json(
-				{ error: "Failed to fetch approval history" })
-		}
+});
 
-
- });
-loansRouter.get('/pending', async(req, res) => {
+loansRouter.get("/pending", async (req, res) => {
 	const session = await getSession(req);
 	if (!session || session.role === "MEMBER") {
 		return res.status(401).json({ error: "Unauthorized" });
@@ -195,41 +303,37 @@ loansRouter.get('/pending', async(req, res) => {
 	const userRole = session.role as UserRole;
 
 	const pendingLoans = await prisma.loan.findMany({
-			where: {
-				order: order.get(userRole)!,
-				status: "PENDING",
-				approvalLogs: {
-					some: {
-						approvalOrder: 0,
-						
-					},
+		where: {
+			order: order.get(userRole)!,
+			status: "PENDING",
+			approvalLogs: {
+				some: {
+					approvalOrder: 0,
 				},
 			},
-			include: {
-				member: true,
-				approvalLogs: {
-					orderBy: { approvalOrder: "desc" },
-					take: 1,
-				},
+		},
+		include: {
+			member: true,
+			approvalLogs: {
+				orderBy: { approvalOrder: "desc" },
+				take: 1,
 			},
-		});
+		},
+	});
 
-		return res.json(pendingLoans);
-	
-
-
-
+	return res.json(pendingLoans);
 });
-loansRouter.get('/disbursed', async(req, res) => {
-	const session  = await getSession(req);
-	if(!session || session.role !== 'COMMITTEE') {
+
+loansRouter.get("/disbursed", async (req, res) => {
+	const session = await getSession(req);
+	if (!session || session.role !== "COMMITTEE") {
 		return res.status(401).json({ error: "Unauthorized" });
 	}
 	try {
 		const disbursedLoans = await prisma.loan.findMany({
 			where: {
 				// status: "DISBURSED",  temporary workaround
-				status: 'APPROVED',
+				status: "APPROVED",
 				order: 3,
 			},
 			include: {
@@ -256,94 +360,135 @@ loansRouter.get('/disbursed', async(req, res) => {
 		return res.json(disbursedLoans);
 	} catch (error) {
 		console.error("Error fetching disbursed loans:", error);
-		return res.status(500).json(
-			{ error: "Failed to fetch disbursed loans" },
-			
-		);
+		return res.status(500).json({ error: "Failed to fetch disbursed loans" });
 	}
+});
 
-})
-loansRouter.post('/apply', upload.single('agreement'), async(req, res)=> {
+loansRouter.post("/apply", upload.single("agreement"), async (req, res) => {
 	const session = await getSession(req);
+
 	if (!session || session.role !== "MEMBER") {
 		return res.status(401).json({ error: "Unauthorized" });
 	}
-	
-	try{
-	const {amount, interestRate, tenureMonths, purpose, coSigner1, coSigner2} = req.body;
-	const agreement = req.file;
-	 if (!amount || !interestRate || !tenureMonths || !purpose || !agreement) {
-      return res.status(400).json({ error: "Missing required fields" });
-    }
-	const loanAmount = parseFloat(amount);
-    const rate = parseFloat(interestRate);
-    const tenure = parseInt(tenureMonths, 10);
-	if (rate !== 9.5) {
-      return res.status(400).json({ error: "Interest rate must be 9.5%" });
-    }
-    if (tenure !== 120) {
-      return res.status(400).json({ error: "Loan tenure must be 120 months (10 years)" });
-    }
-	
-	const member = await prisma.member.findUnique({
+
+	try {
+		const {
+			amount,
+			interestRate,
+			tenureMonths,
+			purpose,
+			coSigner1,
+			coSigner2,
+		} = req.body;
+		const agreement = req.file;
+
+		if (!amount || !interestRate || !tenureMonths || !purpose || !agreement) {
+			return res.status(400).json({ error: "Missing required fields" });
+		}
+
+		const loanAmount = Number.parseFloat(amount);
+		const rate = Number.parseFloat(interestRate);
+		const tenure = Number.parseInt(tenureMonths, 10);
+
+		if (rate !== 9.5) {
+			return res
+				.status(400)
+				.json({ error: "Interest rate must be 9.5% per annum" });
+		}
+
+		if (tenure > 120) {
+			return res
+				.status(400)
+				.json({ error: "Loan tenure cannot exceed 120 months (10 years)" });
+		}
+
+		const member = await prisma.member.findUnique({
 			where: { id: session.id! },
 			include: {
-				balance: true,
 				loans: {
 					where: {
 						status: {
-							in: ['PENDING', 'APPROVED', 'DISBURSED'],
+							in: ["PENDING", "APPROVED", "DISBURSED"],
 						},
 					},
 				},
 			},
 		});
+
 		if (!member) {
 			return res.status(404).json({ error: "Member not found" });
 		}
-		const monthlySalary = member.salary ; // This should come from member data
-		const maxLoanBasedOnSalary = monthlySalary * 30;
-		const hasActiveLoan = member.loans.length > 0;
-		const requiredContributionRate = hasActiveLoan ? 0.35 : 0.3;
-		const totalContribution = Number(member.balance?.totalContributions || 0);
-		const maxLoanBasedOnContribution = totalContribution / requiredContributionRate;
-		const maxLoanAmount = Math.min(
-			maxLoanBasedOnSalary,
-			maxLoanBasedOnContribution
-		);
-		const requiredContribution = loanAmount * requiredContributionRate;
 
-		// Validate loan amount against limits
-		if (loanAmount > maxLoanAmount) {
-			return res.status(400).json(
-				{
-					error: `Loan amount exceeds maximum limit of ${maxLoanAmount.toLocaleString()} ETB`,
-				}
-			);
+		const totalSavings = await calculateTotalSavings(member.id);
+		const totalContributions = await calculateTotalContributions(member.id);
+		const monthlySalary = member.salary || 0;
+
+		const activeLoanBalance = await getActiveLoanBalance(member.id);
+		const hasActiveLoan = activeLoanBalance !== null;
+
+		if (tenure > 120) {
+			return res.status(400).json({
+				error: "Loan tenure cannot exceed 120 months (10 years)",
+				requirement: "Max Loan Term",
+			});
 		}
-		if (totalContribution < requiredContribution) {
-			return res.status(400).json(
-				{
-					error: `Insufficient contribution. Required: ${requiredContribution.toLocaleString()} ETB, Available: ${totalContribution.toLocaleString()} ETB`,
-				}
-			);
+
+		const maxLoanBasedOnSalary = monthlySalary * 30;
+		if (loanAmount > maxLoanBasedOnSalary) {
+			return res.status(400).json({
+				error: `Loan amount exceeds maximum limit based on salary. Maximum: ${maxLoanBasedOnSalary.toLocaleString()} ETB (30 months of salary)`,
+				requirement: "Loan Limit Based on Salary",
+				maxAllowed: maxLoanBasedOnSalary,
+			});
 		}
+
+		const requiredSavingsBeforeLoan = loanAmount * 0.3;
+		if (totalSavings < requiredSavingsBeforeLoan) {
+			return res.status(400).json({
+				error: `Insufficient savings. Required: ${requiredSavingsBeforeLoan.toLocaleString()} ETB (30% of loan amount), Available: ${totalSavings.toLocaleString()} ETB`,
+				requirement: "Savings Requirement Before Loan Approval",
+				required: requiredSavingsBeforeLoan,
+				available: totalSavings,
+			});
+		}
+
+		if (hasActiveLoan) {
+			const requiredMonthlySavings = monthlySalary * 0.35;
+			// Note: This is a validation that the member must continue saving 35% during active loan
+			// The actual enforcement happens during repayment tracking
+			if (monthlySalary === 0) {
+				return res.status(400).json({
+					error:
+						"Cannot apply for additional loan without valid salary information",
+					requirement: "Active Loan Savings Requirement",
+				});
+			}
+		}
+
+		if (hasActiveLoan) {
+			return res.status(400).json({
+				error: `You have an active loan with remaining balance of ${activeLoanBalance!.remainingBalance.toLocaleString()} ETB. Please repay the existing loan before applying for a new one.`,
+				requirement: "Active Loan Balance Tracking",
+				activeLoan: activeLoanBalance,
+			});
+		}
+
 		const fileExtension = path.extname(agreement.originalname);
-		const fileName = `loan_agreement_${Date.now()}_${
-			member.id
-		}${fileExtension}`;
+		const fileName = `loan_agreement_${Date.now()}_${member.id}${fileExtension}`;
 		const uploadDir = path.join(process.cwd(), "public", "loan_agreements");
 		const filePath = path.join(uploadDir, fileName);
+
 		try {
-			await mkdir(uploadDir, {recursive: true});
-		}
-		catch(err) {
+			await mkdir(uploadDir, { recursive: true });
+		} catch (err) {
 			if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
 				throw err;
 			}
 		}
+
 		await writeFile(filePath, agreement.buffer);
 		const documentUrl = `/loan_agreements/${fileName}`;
+
 		const loan = await prisma.loan.create({
 			data: {
 				memberId: member.id,
@@ -365,48 +510,201 @@ loansRouter.post('/apply', upload.single('agreement'), async(req, res)=> {
 				approvalLogs: {
 					create: {
 						role: "MEMBER" as UserRole,
-						status: "PENDING" ,
-						approvedByUserId: session.id,
+						status: "PENDING",
+						approvedByUserId: Number(process.env.ADMIN_ID),
 						approvalOrder: 0,
-						comments: `Loan application submitted. Purpose: ${purpose}. Co-signers: ${
+						comments: `Loan application submitted. Amount: ${loanAmount.toLocaleString()} ETB. Purpose: ${purpose}. Co-signers: ${
 							coSigner1 ? `ID:${coSigner1}` : "None"
-						}, ${coSigner2 ? `ID:${coSigner2}` : "None"}`,
+						}, ${coSigner2 ? `ID:${coSigner2}` : "None"}. Savings: ${totalSavings.toLocaleString()} ETB. Monthly Salary: ${monthlySalary.toLocaleString()} ETB`,
 					} as any,
 				},
 			},
 		});
-		if (!loan) throw Error("can't create the loan")
-		await prisma.notification.create({
-			data: {
-				userId: Number(process.env.ADMIN_ID || 1),
-				title: "New Loan Application",
-				message: `New loan application for ${loanAmount.toLocaleString()} ETB submitted by ${
-					member.name
-				}`,
+
+		if (!loan) throw Error("Failed to create loan");
+
+		const firstApproverId = await getFirstApproverUserId();
+		if (firstApproverId) {
+			await sendNotification({
+				userId: firstApproverId,
+				title: "New Loan Application Pending Review",
+				message: `New loan application (ID: ${loan.id}) for ${loanAmount.toLocaleString()} ETB submitted by ${member.name}. Savings: ${totalSavings.toLocaleString()} ETB (${((totalSavings / loanAmount) * 100).toFixed(1)}% of loan amount). Awaiting your review.`,
 				type: "LOAN_APPLICATION_SUBMITTED",
-			} as any,
-		});
+			});
+		}
+
+		// await prisma.notification.create({
+		// 	data: {
+		// 		userId: Number(process.env.ADMIN_ID || 1),
+		// 		title: "New Loan Application",
+		// 		message: `New loan application for ${loanAmount.toLocaleString()} ETB submitted by ${member.name}. Savings: ${totalSavings.toLocaleString()} ETB (${((totalSavings / loanAmount) * 100).toFixed(1)}% of loan amount)`,
+		// 		type: "LOAN_APPLICATION_SUBMITTED",
+		// 	} as any,
+		// });
+
 		return res.json({
 			success: true,
 			loanId: loan.id,
 			documentUrl: documentUrl,
 			message: "Loan application submitted successfully",
-		});}
-		catch(error){
-			console.error("Error processing loan application:", error);
-		return res.status(500).json(
-			{ error: "Failed to process loan application" },
-			
-		);
-		}
-
-
-
-
-	
+			loanDetails: {
+				amount: loanAmount,
+				interestRate: rate,
+				tenureMonths: tenure,
+				monthlyPayment: calculateMonthlyPayment(loanAmount, rate, tenure),
+			},
+		});
+	} catch (error) {
+		console.error("Error processing loan application:", error);
+		return res
+			.status(500)
+			.json({ error: "Failed to process loan application" });
+	}
 });
-loansRouter.get('/disbursed', async(req, res) => {
-	
+
+// loansRouter.post("/apply", upload.single("agreement"), async (req, res) => {
+// 	const session = await getSession(req);
+// 	if (!session || session.role !== "MEMBER") {
+// 		return res.status(401).json({ error: "Unauthorized" });
+// 	}
+
+// 	try {
+// 		const {
+// 			amount,
+// 			interestRate,
+// 			tenureMonths,
+// 			purpose,
+// 			coSigner1,
+// 			coSigner2,
+// 		} = req.body;
+// 		const agreement = req.file;
+// 		if (!amount || !interestRate || !tenureMonths || !purpose || !agreement) {
+// 			return res.status(400).json({ error: "Missing required fields" });
+// 		}
+// 		const loanAmount = parseFloat(amount);
+// 		const rate = parseFloat(interestRate);
+// 		const tenure = parseInt(tenureMonths, 10);
+// 		if (rate !== 9.5) {
+// 			return res.status(400).json({ error: "Interest rate must be 9.5%" });
+// 		}
+// 		if (tenure !== 120) {
+// 			return res
+// 				.status(400)
+// 				.json({ error: "Loan tenure must be 120 months (10 years)" });
+// 		}
+
+// 		const member = await prisma.member.findUnique({
+// 			where: { id: session.id! },
+// 			include: {
+// 				balance: true,
+// 				loans: {
+// 					where: {
+// 						status: {
+// 							in: ["PENDING", "APPROVED", "DISBURSED"],
+// 						},
+// 					},
+// 				},
+// 			},
+// 		});
+// 		if (!member) {
+// 			return res.status(404).json({ error: "Member not found" });
+// 		}
+// 		const monthlySalary = member.salary; // This should come from member data
+// 		const maxLoanBasedOnSalary = monthlySalary * 30;
+// 		const hasActiveLoan = member.loans.length > 0;
+// 		const requiredContributionRate = hasActiveLoan ? 0.35 : 0.3;
+// 		const totalContribution = Number(member.balance?.totalContributions || 0);
+// 		const maxLoanBasedOnContribution =
+// 			totalContribution / requiredContributionRate;
+// 		const maxLoanAmount = Math.min(
+// 			maxLoanBasedOnSalary,
+// 			maxLoanBasedOnContribution
+// 		);
+// 		const requiredContribution = loanAmount * requiredContributionRate;
+
+// 		// Validate loan amount against limits
+// 		if (loanAmount > maxLoanAmount) {
+// 			return res.status(400).json({
+// 				error: `Loan amount exceeds maximum limit of ${maxLoanAmount.toLocaleString()} ETB`,
+// 			});
+// 		}
+// 		if (totalContribution < requiredContribution) {
+// 			return res.status(400).json({
+// 				error: `Insufficient contribution. Required: ${requiredContribution.toLocaleString()} ETB, Available: ${totalContribution.toLocaleString()} ETB`,
+// 			});
+// 		}
+// 		const fileExtension = path.extname(agreement.originalname);
+// 		const fileName = `loan_agreement_${Date.now()}_${
+// 			member.id
+// 		}${fileExtension}`;
+// 		const uploadDir = path.join(process.cwd(), "public", "loan_agreements");
+// 		const filePath = path.join(uploadDir, fileName);
+// 		try {
+// 			await mkdir(uploadDir, { recursive: true });
+// 		} catch (err) {
+// 			if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
+// 				throw err;
+// 			}
+// 		}
+// 		await writeFile(filePath, agreement.buffer);
+// 		const documentUrl = `/loan_agreements/${fileName}`;
+// 		const loan = await prisma.loan.create({
+// 			data: {
+// 				memberId: member.id,
+// 				amount: loanAmount,
+// 				remainingAmount: loanAmount,
+// 				interestRate: rate,
+// 				tenureMonths: tenure,
+// 				status: "PENDING",
+// 				loanDocuments: {
+// 					create: {
+// 						documentType: "AGREEMENT",
+// 						documentContent: agreement.buffer,
+// 						uploadedByUserId: Number(process.env.ADMIN_ID || 1),
+// 						fileName: fileName,
+// 						mimeType: agreement.mimetype,
+// 						documentUrl: documentUrl,
+// 					} as any,
+// 				},
+// 				approvalLogs: {
+// 					create: {
+// 						role: "MEMBER" as UserRole,
+// 						status: "PENDING",
+// 						approvedByUserId: session.id,
+// 						approvalOrder: 0,
+// 						comments: `Loan application submitted. Purpose: ${purpose}. Co-signers: ${
+// 							coSigner1 ? `ID:${coSigner1}` : "None"
+// 						}, ${coSigner2 ? `ID:${coSigner2}` : "None"}`,
+// 					} as any,
+// 				},
+// 			},
+// 		});
+// 		if (!loan) throw Error("can't create the loan");
+// 		await prisma.notification.create({
+// 			data: {
+// 				userId: Number(process.env.ADMIN_ID || 1),
+// 				title: "New Loan Application",
+// 				message: `New loan application for ${loanAmount.toLocaleString()} ETB submitted by ${
+// 					member.name
+// 				}`,
+// 				type: "LOAN_APPLICATION_SUBMITTED",
+// 			} as any,
+// 		});
+// 		return res.json({
+// 			success: true,
+// 			loanId: loan.id,
+// 			documentUrl: documentUrl,
+// 			message: "Loan application submitted successfully",
+// 		});
+// 	} catch (error) {
+// 		console.error("Error processing loan application:", error);
+// 		return res
+// 			.status(500)
+// 			.json({ error: "Failed to process loan application" });
+// 	}
+// });
+
+loansRouter.get("/disbursed", async (req, res) => {
 	const session = await getSession(req);
 	if (!session || session.role === "MEMBER") {
 		return res.status(401).json({ error: "Unauthorized" });
@@ -441,40 +739,29 @@ loansRouter.get('/disbursed', async(req, res) => {
 		return res.json(disbursedLoans);
 	} catch (error) {
 		console.error("Error fetching disbursed loans:", error);
-		return res.status(500).json(
-			{ error: "Failed to fetch disbursed loans" },
-			
-		);
+		return res.status(500).json({ error: "Failed to fetch disbursed loans" });
 	}
-
 });
-loansRouter.post('/calculate', async (req, res) => {
+
+loansRouter.post("/calculate", async (req, res) => {
 	try {
 		const body = req.body;
 		const result = calculateLoan(body);
 		return res.status(201).json(result);
-
-	}
-	catch (error) {
+	} catch (error) {
 		console.error("Error calculating loan:", error);
-		return res.status(500).json(
-			{ error: "Failed to calculate loan" }
-			
-		);
+		return res.status(500).json({ error: "Failed to calculate loan" });
 	}
 });
-loansRouter.get('/documents', async(req, res) => {
+
+loansRouter.get("/documents", async (req, res) => {
 	const session = await getSession(req);
 	if (
 		!session ||
-		![
-			"ACCOUNTANT",
-			"COMMITTEE",
-			"MANAGER",
-			"SUPERVISOR",
-			"MEMBER",
-		].includes(session.role) 
-	){
+		!["ACCOUNTANT", "COMMITTEE", "MANAGER", "SUPERVISOR", "MEMBER"].includes(
+			session.role
+		)
+	) {
 		return res.status(401).json({ error: "Unauthorized" });
 	}
 	try {
@@ -490,43 +777,31 @@ loansRouter.get('/documents', async(req, res) => {
 			orderBy: { uploadDate: "desc" },
 		});
 		return res.json(documents);
-	} catch(error){
+	} catch (error) {
 		console.error("Error fetching document:", error);
-		return res.status(500).json(
-			{ error: "Internal server error" }
-			
-		);
+		return res.status(500).json({ error: "Internal server error" });
 	}
-	
 });
-loansRouter.post('/documents', upload.single("file"), async (req, res) => {
+
+loansRouter.post("/documents", upload.single("file"), async (req, res) => {
 	const session = await getSession(req);
 	if (
 		!session ||
-		![
-			"ACCOUNTANT",
-			"COMMITTEE",
-			"MANAGER",
-			"SUPERVISOR",
-			"MEMBER",
-		].includes(session.role) 
-	){
+		!["ACCOUNTANT", "COMMITTEE", "MANAGER", "SUPERVISOR", "MEMBER"].includes(
+			session.role
+		)
+	) {
 		return res.status(401).json({ error: "Unauthorized" });
 	}
 	try {
-		 
 		const file = req.file;
 		const documentType = req.body.documentType;
-  		const loanId = Number(req.body.loanId);
+		const loanId = Number(req.body.loanId);
 
 		if (!file || !documentType || !loanId) {
-			return res.status(400).json(
-				{ error: "Missing required fields" },
-				
-			);
+			return res.status(400).json({ error: "Missing required fields" });
 		}
 
-		
 		const fileContent = file.buffer;
 
 		// Generate a unique document URL
@@ -549,25 +824,21 @@ loansRouter.post('/documents', upload.single("file"), async (req, res) => {
 			documentId: document.id,
 			documentUrl: document.documentUrl,
 		});
-	} catch(error){
+	} catch (error) {
 		console.error("Error fetching document:", error);
-		return res.status(500).json(
-			{ error: "Internal server error" }
-			
-		);
+		return res.status(500).json({ error: "Internal server error" });
 	}
 });
-loansRouter.get('/:id', async (req, res) => {
-	
+
+loansRouter.get("/:id", async (req, res) => {
 	const session = await getSession(req);
-	
-	if (!session || !session.id){
+
+	if (!session || !session.id) {
 		return res.status(401).json({ error: "Unauthorized" });
 	}
-	const loanId = Number.parseInt( req.params.id);
+	const loanId = Number.parseInt(req.params.id);
 	if (!loanId) return res.status(401).json({ error: "Unauthorized" });
 
-	
 	try {
 		const loan = await prisma.loan.findUnique({
 			where: { id: loanId },
@@ -589,10 +860,8 @@ loansRouter.get('/:id', async (req, res) => {
 						user: {
 							select: {
 								name: true,
-							
 							},
 						},
-						
 					},
 					orderBy: {
 						approvalOrder: "asc",
@@ -626,7 +895,7 @@ loansRouter.get('/:id', async (req, res) => {
 				...loan.member,
 				email: loan.member.user?.email,
 				phone: loan.member.user?.phone,
-				etNumber: loan.member.etNumber
+				etNumber: loan.member.etNumber,
 			},
 			loanRepayments: loan.loanRepayments || [],
 			approvalLogs: loan.approvalLogs || [],
@@ -634,273 +903,485 @@ loansRouter.get('/:id', async (req, res) => {
 		};
 
 		return res.json(restructuredLoan);
-
-	}
-
-	
-	catch(error){
+	} catch (error) {
 		console.error("Error fetching document:", error);
-		return res.status(500).json(
-			{ error: "Internal server error" }
-			
-		);
+		return res.status(500).json({ error: "Internal server error" });
 	}
-
 });
-loansRouter.get('/documents/:id', async(req, res) => {
-	
+
+loansRouter.get("/documents/:id", async (req, res) => {
 	const session = await getSession(req);
 	if (
 		!session ||
-		![
-			"ACCOUNTANT",
-			"COMMITTEE",
-			"MANAGER",
-			"SUPERVISOR",
-			"MEMBER",
-		].includes(session.role) 
-	){
+		!["ACCOUNTANT", "COMMITTEE", "MANAGER", "SUPERVISOR", "MEMBER"].includes(
+			session.role
+		)
+	) {
 		return res.status(401).json({ error: "Unauthorized" });
 	}
 	try {
-		const documentId = req.params.id; 
+		const documentId = req.params.id;
 		const document = await prisma.loanDocument.findUnique({
 			where: { id: Number.parseInt(documentId) },
 		});
 		if (!document) {
-			return res.status(404).json({error : "Document not found!"})
+			return res.status(404).json({ error: "Document not found!" });
 		}
 		if (session.role === "MEMBER") {
 			const loan = await prisma.loan.findUnique({
 				where: { id: document.loanId },
 				select: { memberId: true },
-		});
-		if (!loan || loan.memberId !== session.etNumber) {
+			});
+			if (!loan || loan.memberId !== session.etNumber) {
 				return res.status(401).json({ error: "Unauthorized" });
-				
 			}
 		}
-		const response = res.type(document.mimeType)
-							.set(
-								"Content-Disposition",
-								`inline; filename="${document.fileName}`
-							)
+		const response = res
+			.type(document.mimeType)
+			.set("Content-Disposition", `inline; filename="${document.fileName}`);
 		return response;
- 
-	}
-	catch(error){
+	} catch (error) {
 		console.error("Error fetching document:", error);
-		return res.status(500).json(
-			{ error: "Internal server error" }
-			
-		);
+		return res.status(500).json({ error: "Internal server error" });
 	}
-
 });
-loansRouter.get('/documents/view', async(req, res) => {
+
+loansRouter.get("/documents/view", async (req, res) => {
 	const session = await getSession(req);
 	if (!session || !session.id) {
 		return res.status(401).json({ error: "Unauthorized" });
 	}
 	const url = req.query.url;
-    if (!url || typeof url !== "string") {
-        return res.status(400).json({ error: "Missing or invalid URL parameter" });
-    }
+	if (!url || typeof url !== "string") {
+		return res.status(400).json({ error: "Missing or invalid URL parameter" });
+	}
 	try {
-		let buffer : Buffer;
+		let buffer: Buffer;
 		let contentType: string;
 
 		if (url.startsWith("http://") || url.startsWith("https://")) {
 			const response = await fetch(url);
 			const arrayBuffer = await response.arrayBuffer();
 			buffer = Buffer.from(arrayBuffer);
-			contentType = response.headers.get("Content-Type") || "application/octet-stream";
-		}
-		else {
+			contentType =
+				response.headers.get("Content-Type") || "application/octet-stream";
+		} else {
 			const filePath = path.join(process.cwd(), "public", url);
 			buffer = await readFile(filePath);
 			contentType = getContentType(filePath);
-
 		}
 		res.setHeader("Content-Type", contentType);
 		res.setHeader("Content-Disposition", "inline");
 		res.send(buffer);
-
-	}
-	catch(error) {
+	} catch (error) {
 		console.error("Error fetching document:", error);
-		return  res.status(500).json("Failed to fetch document");
-
+		return res.status(500).json("Failed to fetch document");
 	}
-
-
-
 });
 
-loansRouter.post('/approve/:id', async (req, res) => {
+loansRouter.post("/approve/:id", async (req, res) => {
+	const id = req.params.id;
+	const session = await getSession(req);
+	if (!session || session.role === "MEMBER") {
+		return res.status(401).json({ error: "Unauthorized" });
+	}
 
-  const id = req.params.id;
-  const session = await getSession(req);
-  if (!session || session.role === "MEMBER") return res.status(401).json({ error: "Unauthorized" });
-  const userRole = session.role!;
-  const {status, comment} = req.body;
-  try {
-	 const loan = await prisma.loan.findUnique({
-      where: { id: Number.parseInt(id) },
-      include: { member: true },
-    });
+	const userRole = session.role as UserRole;
+	const { status, comment } = req.body;
 
-	if (!loan) return res.status(404).json({ error: "Loan not found" });
-	if (status == 'REJECTED') {
-		await prisma.loan.update({
-		where: { id: loan.id },
-		data: {
-			order: -1,
-			status: 'REJECTED',
-			approvalLogs: {
-			create: {
-				approvedByUserId: session.id!, 
-				role: userRole as UserRole,   
-				status: 'REJECTED',           
-				approvalOrder: -1,
-				comments: 'Loan rejected by admin',
-				
-			}
-			}
-		}
-	});
-	await sendNotification({
-        userId: loan.memberId,
-        title: 'Loan Rejected',
-        message: `Loan (ID: ${loan.id}) was rejected because of the following reason \n ${comment}`,
-        type: 'LOAN_APPROVAL_UPDATE',
-      });
-	return;
-
-	} 
-	if (status === 'APPROVED') {
-		 const currentRoleIndex = APPROVAL_HIERARCHY.indexOf(session.role as UserRole);
-		 const loanApprovals = await prisma.loanApprovalLog.findMany({
-		where: { loanId: loan.id },
-		orderBy: { approvalOrder: 'asc' },
+	try {
+		const loan = await prisma.loan.findUnique({
+			where: { id: Number.parseInt(id) },
+			include: {
+				member: true,
+				approvalLogs: {
+					orderBy: { approvalOrder: "asc" },
+				},
+			},
 		});
-		for (let i = 0; i < currentRoleIndex; i++) {
-		const role = APPROVAL_HIERARCHY[i];
-		if (!loanApprovals.find(log => log.role === role)) {
-			console.log('this here is the issue')
-			return res.status(400).json({ error: `${role} must approve the loan before ${session.role}` });
-		}
+
+		if (!loan) {
+			return res.status(404).json({ error: "Loan not found" });
 		}
 
-		if (session.role !== UserRole.COMMITTEE) {
-			if (loanApprovals.some(log => log.role === session.role)) {
-				return res.status(400).json({ error: `${session.role} has already approved this loan.` });
+		if (status === "REJECTED") {
+			await prisma.loan.update({
+				where: { id: loan.id },
+				data: {
+					status: "REJECTED",
+					approvalLogs: {
+						create: {
+							approvedByUserId: session.id!,
+							role: userRole,
+							status: "REJECTED",
+							approvalOrder: -1,
+							comments: comment || "Loan rejected",
+						},
+					},
+				},
+			});
+
+			await sendNotification({
+				userId: loan.memberId,
+				title: "Loan Application Rejected",
+				message: `Your loan application (ID: ${loan.id}) for ${loan.amount.toLocaleString()} ETB has been rejected. Reason: ${comment || "No reason provided"}`,
+				type: "LOAN_APPROVAL_UPDATE",
+			});
+
+			return res.json({
+				success: true,
+				message: "Loan rejected successfully",
+				loan: { id: loan.id, status: "REJECTED" },
+			});
+		}
+
+		if (status === "APPROVED") {
+			const currentRoleIndex = APPROVAL_HIERARCHY.indexOf(userRole);
+
+			if (currentRoleIndex === -1) {
+				return res
+					.status(400)
+					.json({ error: "Invalid user role for approval" });
 			}
+
+			// Validate that all previous roles have approved
+			for (let i = 0; i < currentRoleIndex; i++) {
+				const role = APPROVAL_HIERARCHY[i];
+				if (
+					!loan.approvalLogs.some(
+						(log) => log.role === role && log.status === "APPROVED"
+					)
+				) {
+					return res.status(400).json({
+						error: `${role} must approve the loan before ${userRole}`,
+					});
+				}
+			}
+
+			// Check if current role has already approved
+			if (
+				loan.approvalLogs.some(
+					(log) => log.role === userRole && log.status === "APPROVED"
+				)
+			) {
+				return res.status(400).json({
+					error: `${userRole} has already approved this loan`,
+				});
+			}
+
+			if (userRole === UserRole.COMMITTEE) {
+				const committeeApprovals = loan.approvalLogs.filter(
+					(log) => log.role === UserRole.COMMITTEE && log.status === "APPROVED"
+				);
+
+				// If this is the final committee approval (2 approvals needed)
+				if (committeeApprovals.length >= MIN_COMMITTEE_APPROVAL - 1) {
+					const updatedLoan = await prisma.loan.update({
+						where: { id: loan.id },
+						data: {
+							status: "DISBURSED",
+							approvalLogs: {
+								create: {
+									approvedByUserId: session.id!,
+									role: userRole,
+									status: "APPROVED",
+									approvalOrder: currentRoleIndex,
+									comments:
+										comment || "Loan approved and disbursed by committee",
+									committeeApproval: committeeApprovals.length + 1,
+								},
+							},
+						},
+					});
+
+					await createLoanRepayments(updatedLoan);
+
+					await sendNotification({
+						userId: loan.memberId,
+						title: "Loan Approved and Disbursed",
+						message: `Your loan application (ID: ${loan.id}) for ${loan.amount.toLocaleString()} ETB has been approved and disbursed. Monthly payment: ${calculateMonthlyPayment(Number(loan.amount), Number(loan.interestRate), loan.tenureMonths).toLocaleString()} ETB`,
+						type: "LOAN_DISBURSEMENT_READY",
+					});
+
+					return res.json({
+						success: true,
+						message: "Loan approved and disbursed successfully",
+						loan: updatedLoan,
+					});
+				}
+
+				// If not yet final approval, add committee approval and wait for next committee member
+				const updatedLoan = await prisma.loan.update({
+					where: { id: loan.id },
+					data: {
+						approvalLogs: {
+							create: {
+								approvedByUserId: session.id!,
+								role: userRole,
+								status: "APPROVED",
+								approvalOrder: currentRoleIndex,
+								comments: comment || "Loan approved by committee member",
+								committeeApproval: committeeApprovals.length + 1,
+							},
+						},
+					},
+				});
+
+				const remainingApprovals =
+					MIN_COMMITTEE_APPROVAL - committeeApprovals.length - 1;
+				if (remainingApprovals > 0) {
+					const otherCommitteeMembers = await prisma.user.findMany({
+						where: {
+							role: UserRole.COMMITTEE,
+							id: { not: session.id! },
+						},
+					});
+
+					if (otherCommitteeMembers.length > 0) {
+						await sendNotification({
+							userId: otherCommitteeMembers[0].id,
+							title: "Loan Pending Committee Approval",
+							message: `Loan application (ID: ${loan.id}) for ${loan.amount.toLocaleString()} ETB is pending your committee approval. ${remainingApprovals} more approval(s) needed.`,
+							type: "LOAN_APPROVAL_UPDATE",
+						});
+					}
+				}
+
+				return res.json({
+					success: true,
+					message: `Loan approved by committee (${committeeApprovals.length + 1}/${MIN_COMMITTEE_APPROVAL} approvals)`,
+					loan: updatedLoan,
+				});
+			}
+
 			const updatedLoan = await prisma.loan.update({
 				where: { id: loan.id },
 				data: {
-					order: {increment : 1},
-					status: 'PENDING',
+					order: { increment: 1 },
 					approvalLogs: {
-					create: {
-						approvedByUserId: session.id!, 
-						role: userRole as UserRole,   
-						status: 'APPROVED',           
-						approvalOrder: currentRoleIndex+1,
-						comments: 'Loan was approved by admin',
-								
-						}
-					}
-				}
-			});	
-
-
-			 return res.json({
-			success: true,
-			message: `Loan ${status === "REJECTED" ? "rejected" : "approved"} successfully.`,
-			loan: updatedLoan,
-			});
-	}
-
-	const lastApproved = loanApprovals[loanApprovals.length-1]!;
-	
-	
-	// this can't be undefined or null
-	//we should take the committe approval
-	// 
-	if (lastApproved?.committeeApproval >= MIN_COMMITTEE_APPROVAL - 1) {
-		const updatedLoan = await prisma.loan.update({
-				where: { 
-					id: loan.id,
-					
-
-
+						create: {
+							approvedByUserId: session.id!,
+							role: userRole,
+							status: "APPROVED",
+							approvalOrder: currentRoleIndex,
+							comments: comment || `Loan approved by ${userRole}`,
+						},
+					},
 				},
-				data: {
-					status: 'APPROVED',
-					approvalLogs: {
-					create: {
-						approvedByUserId: session.id!, 
-						role: userRole as UserRole,   
-						status: 'DISBURSED',   
-						approvalOrder: currentRoleIndex,        
-						comments: 'Loan disbursed by committee',
-								
-						}
-					}
-				}
-			});	
-		await sendNotification({
-          userId: session.id!,
-          title: "Loan has been successfully disbursed",
-          message: `Loan ID ${loan.id} has been disbursed`,
-          type: "LOAN_STATUS_UPDATE",
-        });
-		 return res.json({
-      success: true,
-      message: `Loan DISBURSED successfully.`,
-      loan: updatedLoan,
-    }); 
+			});
 
-		
+			// Get next approver and send notification
+			const nextApproverId = await getNextApproverUserId(currentRoleIndex);
+			if (nextApproverId) {
+				const nextRole = APPROVAL_HIERARCHY[currentRoleIndex + 1];
+				await sendNotification({
+					userId: nextApproverId,
+					title: `Loan Pending ${nextRole} Approval`,
+					message: `Loan application (ID: ${loan.id}) for ${loan.amount.toLocaleString()} ETB has been approved by ${userRole} and is now pending your review.`,
+					type: "LOAN_STATUS_UPDATE",
+				});
+			}
+
+			return res.json({
+				success: true,
+				message: `Loan approved by ${userRole} and forwarded to next approval level`,
+				loan: updatedLoan,
+			});
+		}
+
+		return res.status(400).json({ error: "Invalid approval status" });
+	} catch (error) {
+		console.error("Error approving loan:", error);
+		return res.status(500).json({ error: "Failed to process loan approval" });
 	}
-	const updatedLoan = await prisma.loan.update({
-				where: { id: loan.id },
-				data: {
-					status: 'PENDING',
-					approvalLogs: {
-					create: {
-						approvedByUserId: session.id!, 
-						role: userRole as UserRole,   
-						status: 'APPROVED',   
-						approvalOrder: currentRoleIndex,        
-						comments: 'Loan approved by committee',
-						committeeApproval: lastApproved.committeeApproval + 1
-								
-						}
-					}
-				}
-			});	
-	await createLoanRepayments(updatedLoan);
-	
-	
-
-	
-
-    return res.json({
-      success: true,
-      message: `Loan ${status === "REJECTED" ? "rejected" : "approved"} successfully.`,
-      loan: updatedLoan,
-    });
-}
-
-  } catch (error) {
-    console.error("Error approving loan:", error);
-    return res.status(500).json({ error: "Failed to process loan approval." });
-  }
 });
 
-loansRouter.patch('/status/:id', async(req, res) => {
+// loansRouter.post("/approve/:id", async (req, res) => {
+// 	const id = req.params.id;
+// 	const session = await getSession(req);
+// 	if (!session || session.role === "MEMBER")
+// 		return res.status(401).json({ error: "Unauthorized" });
+// 	const userRole = session.role!;
+// 	const { status, comment } = req.body;
+// 	try {
+// 		const loan = await prisma.loan.findUnique({
+// 			where: { id: Number.parseInt(id) },
+// 			include: { member: true },
+// 		});
+
+// 		if (!loan) return res.status(404).json({ error: "Loan not found" });
+// 		if (status == "REJECTED") {
+// 			await prisma.loan.update({
+// 				where: { id: loan.id },
+// 				data: {
+// 					order: -1,
+// 					status: "REJECTED",
+// 					approvalLogs: {
+// 						create: {
+// 							approvedByUserId: session.id!,
+// 							role: userRole as UserRole,
+// 							status: "REJECTED",
+// 							approvalOrder: -1,
+// 							comments: "Loan rejected by admin",
+// 						},
+// 					},
+// 				},
+// 			});
+// 			// await sendNotification({
+// 			// 	userId: loan.memberId,
+// 			// 	title: "Loan Rejected",
+// 			// 	message: `Loan (ID: ${loan.id}) was rejected because of the following reason \n ${comment}`,
+// 			// 	type: "LOAN_APPROVAL_UPDATE",
+// 			// });
+// 			await sendNotification({
+// 				userId: loan.memberId,
+// 				title: "Loan Application Rejected",
+// 				message: `Your loan application (ID: ${loan.id}) for ${loan.amount.toLocaleString()} ETB has been rejected. Reason: ${comment || "No reason provided"}`,
+// 				type: "LOAN_APPROVAL_UPDATE",
+// 			});
+// 			return;
+// 		}
+// 		if (status === "APPROVED") {
+// 			const currentRoleIndex = APPROVAL_HIERARCHY.indexOf(
+// 				session.role as UserRole
+// 			);
+// 			const loanApprovals = await prisma.loanApprovalLog.findMany({
+// 				where: { loanId: loan.id },
+// 				orderBy: { approvalOrder: "asc" },
+// 			});
+// 			for (let i = 0; i < currentRoleIndex; i++) {
+// 				const role = APPROVAL_HIERARCHY[i];
+// 				if (!loanApprovals.find((log) => log.role === role)) {
+// 					console.log("this here is the issue");
+// 					return res.status(400).json({
+// 						error: `${role} must approve the loan before ${session.role}`,
+// 					});
+// 				}
+// 			}
+
+// 			if (session.role !== UserRole.COMMITTEE) {
+// 				if (loanApprovals.some((log) => log.role === session.role)) {
+// 					return res
+// 						.status(400)
+// 						.json({ error: `${session.role} has already approved this loan.` });
+// 				}
+// 				const updatedLoan = await prisma.loan.update({
+// 					where: { id: loan.id },
+// 					data: {
+// 						order: { increment: 1 },
+// 						status: "PENDING",
+// 						approvalLogs: {
+// 							create: {
+// 								approvedByUserId: session.id!,
+// 								role: userRole as UserRole,
+// 								status: "APPROVED",
+// 								approvalOrder: currentRoleIndex + 1,
+// 								comments: "Loan was approved by admin",
+// 							},
+// 						},
+// 					},
+// 				});
+
+// 				await sendNotification({
+// 					userId: loan.memberId,
+// 					title: "Loan Approved and Disbursed",
+// 					message: `Your loan application (ID: ${loan.id}) for ${loan.amount.toLocaleString()} ETB has been approved and disbursed. Monthly payment: ${calculateMonthlyPayment(Number(loan.amount), Number(loan.interestRate), loan.tenureMonths).toLocaleString()} ETB`,
+// 					type: "LOAN_STATUS_UPDATE",
+// 				});
+
+// 				// await sendNotification({
+// 				// 	userId: session.id!,
+// 				// 	title: "Loan has been successfully disbursed",
+// 				// 	message: `Loan ID ${loan.id} has been disbursed`,
+// 				// 	type: "LOAN_STATUS_UPDATE",
+// 				// });
+
+// 				return res.json({
+// 					success: true,
+// 					message: `Loan ${status === "REJECTED" ? "rejected" : "approved"} successfully.`,
+// 					loan: updatedLoan,
+// 				});
+// 			}
+
+// 			// If not yet final approval, add committee approval and wait for next committee member
+
+// 			const lastApproved = loanApprovals[loanApprovals.length - 1]!;
+
+// 			if (lastApproved?.committeeApproval >= MIN_COMMITTEE_APPROVAL - 1) {
+// 				const updatedLoan = await prisma.loan.update({
+// 					where: {
+// 						id: loan.id,
+// 					},
+// 					data: {
+// 						status: "DISBURSED",
+// 						approvalLogs: {
+// 							create: {
+// 								approvedByUserId: session.id!,
+// 								role: userRole as UserRole,
+// 								status: "DISBURSED",
+// 								approvalOrder: currentRoleIndex,
+// 								comments: "Loan disbursed by committee",
+// 							},
+// 						},
+// 					},
+// 				});
+// 				// await sendNotification({
+// 				// 	userId: session.id!,
+// 				// 	title: "Loan has been successfully disbursed",
+// 				// 	message: `Loan ID ${loan.id} has been disbursed`,
+// 				// 	type: "LOAN_STATUS_UPDATE",
+// 				// });
+// 				const otherCommitteeMembers = await prisma.user.findMany({
+// 					where: {
+// 						role: UserRole.COMMITTEE,
+// 						id: { not: session.id! },
+// 					},
+// 				});
+// 				await sendNotification({
+// 					userId: otherCommitteeMembers[0].id,
+// 					title: "Loan Pending Committee Approval",
+// 					message: `Loan application (ID: ${loan.id}) for ${loan.amount.toLocaleString()} ETB is pending your committee approval. ${remainingApprovals} more approval(s) needed.`,
+// 					type: "LOAN_APPROVAL_UPDATE",
+// 				});
+// 				return res.json({
+// 					success: true,
+// 					message: `Loan DISBURSED successfully.`,
+// 					loan: updatedLoan,
+// 				});
+// 			}
+
+// 			const updatedLoan = await prisma.loan.update({
+// 				where: { id: loan.id },
+// 				data: {
+// 					status: "PENDING",
+// 					approvalLogs: {
+// 						create: {
+// 							approvedByUserId: session.id!,
+// 							role: userRole as UserRole,
+// 							status: "APPROVED",
+// 							approvalOrder: currentRoleIndex,
+// 							comments: "Loan approved by committee",
+// 							committeeApproval: lastApproved.committeeApproval + 1,
+// 						},
+// 					},
+// 				},
+// 			});
+
+// 			await createLoanRepayments(updatedLoan);
+
+// 			return res.json({
+// 				success: true,
+// 				message: `Loan ${status === "REJECTED" ? "rejected" : "approved"} successfully.`,
+// 				loan: updatedLoan,
+// 			});
+// 		}
+// 	} catch (error) {
+// 		console.error("Error approving loan:", error);
+// 		return res.status(500).json({ error: "Failed to process loan approval." });
+// 	}
+// });
+
+loansRouter.patch("/status/:id", async (req, res) => {
 	const id = req.params.id;
 	const session = await getSession(req);
 	if (!session || session.role === "MEMBER") {
@@ -917,13 +1398,8 @@ loansRouter.patch('/status/:id', async(req, res) => {
 		return res.json(updatedLoan);
 	} catch (error) {
 		console.error("Error updating loan status:", error);
-		return res.status(500).json(
-			{ error: "Failed to update loan status" },
-			);
+		return res.status(500).json({ error: "Failed to update loan status" });
 	}
-
 });
-
-
 
 export default loansRouter;

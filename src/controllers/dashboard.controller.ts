@@ -1,59 +1,60 @@
-import express from 'express'
-import type { Request, Response } from 'express';
-import { prisma } from '../config/prisma.js';
+import express from "express";
+import type { Request, Response } from "express";
+import { prisma } from "../config/prisma";
 import {
-    LoanApprovalStatus,
+	LoanApprovalStatus,
 	RepaymentStatus,
 	TransactionType,
 	UserRole,
 } from "@prisma/client";
 import { startOfMonth, subMonths, format } from "date-fns";
-import { getSession } from './auth/auth.js';
+import { getSession } from "./auth/auth";
 const order = new Map<UserRole, number>([
-  [UserRole.ACCOUNTANT, 0],
-  [UserRole.SUPERVISOR, 1],
-  [UserRole.MANAGER, 2],
-  [UserRole.COMMITTEE, 3],
+	[UserRole.ACCOUNTANT, 0],
+	[UserRole.SUPERVISOR, 1],
+	[UserRole.MANAGER, 2],
+	[UserRole.COMMITTEE, 3],
 ]);
 
 const dashboardRouter = express.Router();
 
-dashboardRouter.get('/', async (req: Request, res:Response) => {
+dashboardRouter.get("/", async (req: Request, res: Response) => {
 	const session = await getSession(req);
-		if (!session || session.role === "MEMBER") {
-			return res.status(401).json({ error: "Unauthorized" });
-		}
+	console.log({
+		session,
+	});
+	if (!session || session.role === "MEMBER") {
+		return res.status(401).json({ error: "Unauthorized" });
+	}
 	const userRole = session.role as UserRole;
-    res.set({
-         "Cache-Control": "no-cache, no-store, must-revalidate",
-        "Pragma": "no-cache",
-        "Expires": "0"
-    });
-   
-   
-    try {
-		
+	res.set({
+		"Cache-Control": "no-cache, no-store, must-revalidate",
+		"Pragma": "no-cache",
+		"Expires": "0",
+	});
 
-        // Basic matrics
-        const totalMembers = await prisma.member.count();
+	try {
+		// Basic matrics
+		const totalMembers = await prisma.member.count();
 
-        // Use Loan schema for loan-related metrics
-        const activeLoanCount = await prisma.loan.count({
-            where : {status : LoanApprovalStatus.DISBURSED}
-        });
-
-        const pendingApprovals = await prisma.loan.count({
-			where: { status: LoanApprovalStatus.PENDING,
-				order: order.get(userRole)!,
-			 },
+		// Use Loan schema for loan-related metrics
+		const activeLoanCount = await prisma.loan.count({
+			where: { status: LoanApprovalStatus.DISBURSED },
 		});
 
-        const totalSavingsTransactions = await prisma.transaction.aggregate({
+		const pendingApprovals = await prisma.loan.count({
+			where: {
+				status: LoanApprovalStatus.PENDING,
+				order: order.get(userRole)!,
+			},
+		});
+
+		const totalSavingsTransactions = await prisma.transaction.aggregate({
 			where: { type: TransactionType.SAVINGS },
 			_sum: { amount: true },
 		});
 
-        const membershipFeeTransactions = await prisma.transaction.aggregate({
+		const membershipFeeTransactions = await prisma.transaction.aggregate({
 			where: { type: TransactionType.MEMBERSHIP_FEE },
 			_sum: { amount: true },
 		});
@@ -63,13 +64,13 @@ dashboardRouter.get('/', async (req: Request, res:Response) => {
 			_sum: { amount: true },
 		});
 
-        // Use Loan schema for loan portfolio
+		// Use Loan schema for loan portfolio
 		const loanPortfolio = await prisma.loan.aggregate({
 			where: { status: LoanApprovalStatus.DISBURSED },
 			_sum: { amount: true },
 		});
 
-        const outstandingLoans = await prisma.loan.aggregate({
+		const outstandingLoans = await prisma.loan.aggregate({
 			where: {
 				status: LoanApprovalStatus.DISBURSED,
 				remainingAmount: { gt: 0 },
@@ -77,13 +78,12 @@ dashboardRouter.get('/', async (req: Request, res:Response) => {
 			_sum: { remainingAmount: true },
 		});
 
-        const totalRepayments = await prisma.loanRepayment.aggregate({
+		const totalRepayments = await prisma.loanRepayment.aggregate({
 			where: { status: RepaymentStatus.PAID },
 			_sum: { amount: true },
 		});
 
-
-        const overdueLoans = await prisma.loanRepayment.aggregate({
+		const overdueLoans = await prisma.loanRepayment.aggregate({
 			where: {
 				status: RepaymentStatus.OVERDUE,
 				loan: { status: LoanApprovalStatus.DISBURSED },
@@ -91,11 +91,14 @@ dashboardRouter.get('/', async (req: Request, res:Response) => {
 			_sum: { amount: true },
 		});
 
-        const portfolioAtRisk =
+		const portfolioAtRisk =
 			overdueLoans._sum.amount && loanPortfolio._sum.amount
-				? (Number(overdueLoans._sum.amount) / Number(loanPortfolio._sum.amount) ) * 100 : 0;
+				? (Number(overdueLoans._sum.amount) /
+						Number(loanPortfolio._sum.amount)) *
+					100
+				: 0;
 
-        const loanStatusDistribution = await prisma.loan.groupBy({
+		const loanStatusDistribution = await prisma.loan.groupBy({
 			by: ["status"],
 			_count: true,
 			_sum: { amount: true },
@@ -299,53 +302,42 @@ dashboardRouter.get('/', async (req: Request, res:Response) => {
 			totalSavings: saver.totalSavings,
 		}));
 
-		return res.json(
-			{
-				// Basic metrics
-				totalMembers,
-				activeLoanCount,
-				totalSavings: totalSavingsTransactions._sum.amount || 0,
-				pendingApprovals,
+		return res.json({
+			// Basic metrics
+			totalMembers,
+			activeLoanCount,
+			totalSavings: totalSavingsTransactions._sum.amount || 0,
+			pendingApprovals,
 
-				// Financial metrics from transactions
-				membershipFees: membershipFeeTransactions._sum.amount || 0,
-				willingDeposits: willingDepositTransactions._sum.amount || 0,
-				loanRepayments: totalRepayments._sum.amount || 0, // Using LoanRepayment schema
+			// Financial metrics from transactions
+			membershipFees: membershipFeeTransactions._sum.amount || 0,
+			willingDeposits: willingDepositTransactions._sum.amount || 0,
+			loanRepayments: totalRepayments._sum.amount || 0, // Using LoanRepayment schema
 
-				// Loan portfolio metrics
-				loanPortfolio: loanPortfolio._sum.amount || 0,
-				outstandingLoans: outstandingLoans._sum.remainingAmount || 0, // Fixed property access
-				portfolioAtRisk,
+			// Loan portfolio metrics
+			loanPortfolio: loanPortfolio._sum.amount || 0,
+			outstandingLoans: outstandingLoans._sum.remainingAmount || 0, // Fixed property access
+			portfolioAtRisk,
 
-				// Distributions
-				loanStatusDistribution: formattedLoanStatusDistribution,
-				departmentDistribution: formattedDepartmentDistribution,
-				transactionDistribution: formattedTransactionDistribution,
-				loanSizeDistribution,
+			// Distributions
+			loanStatusDistribution: formattedLoanStatusDistribution,
+			departmentDistribution: formattedDepartmentDistribution,
+			transactionDistribution: formattedTransactionDistribution,
+			loanSizeDistribution,
 
-				// Trends
-				loanTrends,
-				savingsTrends,
-				repaymentTrends,
+			// Trends
+			loanTrends,
+			savingsTrends,
+			repaymentTrends,
 
-				// Lists
-				recentLoans: formattedRecentLoans,
-				topSavers: formattedTopSavers,
-			}
-		);
-
-
-
-    }
-    catch(err) {
-		console.log(err)
+			// Lists
+			recentLoans: formattedRecentLoans,
+			topSavers: formattedTopSavers,
+		});
+	} catch (err) {
+		console.log(err);
 		return res.status(500).json({ message: "Internal server error" });
-		 
-
-    }
-
+	}
 });
 
-
-
-export default dashboardRouter
+export default dashboardRouter;

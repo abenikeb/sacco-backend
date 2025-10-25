@@ -1,5 +1,5 @@
 import { LoanApprovalStatus, TransactionType } from "@prisma/client";
-import { createJournalEntry, mapToAccountingType } from "./createJournal.js";
+import { createJournalEntry, mapToAccountingType } from "./createJournal";
 
 export async function handleLoanRepayment(
 	prisma: any,
@@ -23,7 +23,6 @@ export async function handleLoanRepayment(
 		orderBy: { createdAt: "desc" },
 	});
 
-	
 	if (!activeLoan) {
 		console.log("No active loan found for the member");
 		return;
@@ -34,7 +33,6 @@ export async function handleLoanRepayment(
 		activeLoan,
 		loanRepayments: activeLoan.loanRepayments,
 	});
-
 
 	let remainingAmount = repaymentAmount;
 

@@ -1,31 +1,37 @@
-import express from 'express';
-import cors from 'cors';
-import cookieParser from 'cookie-parser';
-import apiRoutes from './routes.js';
-
+import express from "express";
+import http from "http";
+import cors from "cors";
+import cookieParser from "cookie-parser";
+import { initializeSocket } from "@/src/utils/socket-handler";
+import apiRoutes from "./routes";
 const app = express();
 
 // Middleware
 app.use(express.json());
 app.use(cookieParser());
 
-// CORS - allow all
-app.use(cors({
-    origin: '*', 
-    credentials: true, // Allow cookies/authorization headers
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
-}));
+const server = http.createServer(app);
+initializeSocket(server);
 
-app.get('/health-check', (req, res) => {
-    res.json({ message: 'Server is running' });
+app.use(
+	cors({
+		origin: process.env.FRONTEND_URL || "http://localhost:3001",
+		credentials: true, // Allow cookies and auth headers
+		methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+		allowedHeaders: ["Content-Type", "Authorization", "Cache-Control"],
+	})
+);
+app.get("/health-check", (req, res) => {
+	res.json({ message: "Server is running" });
 });
 
-app.use('/api', apiRoutes);
+app.use("/api", apiRoutes);
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Server started on port ${PORT}`);
+
+server.listen(PORT, () => {
+	console.log(`Backend server running on http://localhost:${PORT}`);
+	console.log(`Socket.IO server initialized and listening for connections`);
 });
 
 export default app;

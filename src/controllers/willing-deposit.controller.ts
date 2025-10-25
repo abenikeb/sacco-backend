@@ -1,16 +1,16 @@
-import express from 'express'
-import { prisma } from '../config/prisma.js';
+import express from "express";
+import { prisma } from "../config/prisma";
 import {
-    LoanApprovalStatus,
+	LoanApprovalStatus,
 	RepaymentStatus,
 	TransactionType,
 } from "@prisma/client";
 
 const willingDepositRouter = express.Router();
 
-willingDepositRouter.get("/requests", async (req, res)=> {
+willingDepositRouter.get("/requests", async (req, res) => {
 	try {
-		const userId = ( req.query.userId || "").toString();
+		const userId = (req.query.userId || "").toString();
 		const status = req.query.status || "ALL";
 		const id = req.query.id;
 		const toDate = req.query.toDate;
@@ -33,24 +33,15 @@ willingDepositRouter.get("/requests", async (req, res)=> {
 		const pageNumber = page ? page : 1;
 		const pageSizeNumber = pageSize ? pageSize : 10;
 		const skip = (pageNumber - 1) * pageSizeNumber;
-
-			
-
-
-
-	}
-	catch(error) {
+	} catch (error) {
 		console.error("Error fetching willing deposit requests:", error);
-		return res.status(500).json(
-			{ error: "Error fetching willing deposit requests"}
-
-		);
-
+		return res
+			.status(500)
+			.json({ error: "Error fetching willing deposit requests" });
 	}
 });
 
-
-willingDepositRouter.post("/requests", async (req, res)=> {
+willingDepositRouter.post("/requests", async (req, res) => {
 	try {
 		const {
 			userId,
@@ -70,24 +61,14 @@ willingDepositRouter.post("/requests", async (req, res)=> {
 			!transactionHash ||
 			!status
 		) {
-			return res.status(400).json(
-				{ message: "Missing required fields" }
-				
-			);
+			return res.status(400).json({ message: "Missing required fields" });
 		}
 		// the implementation is lacking
-
-
-
-	}
-	catch(error) {
-		return res.status(500).json(
-			{ error: "Error creating willing deposit request"}
-
-		);
-
+	} catch (error) {
+		return res
+			.status(500)
+			.json({ error: "Error creating willing deposit request" });
 	}
 });
 
-
-export default  willingDepositRouter
+export default willingDepositRouter;

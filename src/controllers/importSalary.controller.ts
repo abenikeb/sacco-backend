@@ -20,7 +20,7 @@
 //     if (!req.file) return res.status(400).json({message : "Upload a file first"});
 //     const workbook = XLSX.readFile(req.file?.path);
 //     const sheetName = workbook.SheetNames[0];
-//     const sheet = workbook.Sheets[sheetName!]; // 
+//     const sheet = workbook.Sheets[sheetName!]; //
 //     const data: { etNumber: number; email: string; salary: number }[] = XLSX.utils.sheet_to_json(sheet!);// we can change this later on
 //     for (const row of data){
 //         if (!row.email || !row.salary) continue;
@@ -35,8 +35,6 @@
 //         console.error("Error importing salaries:", error);
 //         return res.status(500).json({ error: "Failed to import salaries" });
 //     }
-
-
 
 // })
 // export default salaryRouter;

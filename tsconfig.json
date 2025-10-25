@@ -1,52 +1,68 @@
 {
-  // Visit https://aka.ms/tsconfig to read more about this file
-  "compilerOptions": {
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "target": "ES2020",
-    "strict": true,
-    "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true,
-    "rootDir": "src",
-    "outDir": "dist",
+	"$schema": "https://json.schemastore.org/tsconfig",
+	"display": "Node + Express + Prisma Backend",
 
-   
+	"compilerOptions": {
+		/* === Core Settings === */
+		"target": "ES2022",
+		"module": "CommonJS",
+		"moduleResolution": "Node",
+		"lib": ["ES2022"],
+		"types": ["node"],
+		"allowSyntheticDefaultImports": true,
+		"esModuleInterop": true,
+		"resolveJsonModule": true,
 
-    // Environment Settings
-    // See also https://aka.ms/tsconfig/module
-    
-   
-    // For nodejs:
-    // "lib": ["esnext"],
-    "types": ["node"],
-    // and npm install -D @types/node
+		/* === Project Structure === */
+		"rootDir": "src",
+		"outDir": "dist",
+		"baseUrl": "./",
 
-    // Other Outputs
-    "sourceMap": true,
-    "declaration": true,
-    "declarationMap": true,
-    
+		/* === Output === */
+		"sourceMap": true,
+		"declaration": true,
+		"declarationMap": true,
+		"removeComments": false,
 
-    // Stricter Typechecking Options
-    "noUncheckedIndexedAccess": true,
-    "exactOptionalPropertyTypes": true,
-    
+		/* === Path Aliases === */
+		"paths": {
+			"@/*": ["*"],
+			"@/controllers/*": ["controllers/*"],
+			"@/services/*": ["services/*"],
+			"@/prisma/*": ["prisma/*"],
+			"@/middlewares/*": ["middlewares/*"],
+			"@/utils/*": ["utils/*"],
+			"@/config/*": ["config/*"],
+			"@/routes/*": ["routes/*"],
+			"@/types/*": ["types/*"]
+		},
 
+		/* === Type Checking Strictness === */
+		"strict": false,
+		"forceConsistentCasingInFileNames": false,
+		"noImplicitAny": false,
+		"noImplicitThis": false,
+		"noImplicitReturns": false,
+		"noFallthroughCasesInSwitch": false,
+		"noUncheckedIndexedAccess": false,
+		"exactOptionalPropertyTypes": false,
+		"useUnknownInCatchVariables": false,
 
-    // Style Options
-    // "noImplicitReturns": true,
-    // "noImplicitOverride": true,
-    // "noUnusedLocals": true,
-    // "noUnusedParameters": true,
-    // "noFallthroughCasesInSwitch": true,
-    // "noPropertyAccessFromIndexSignature": true,
+		/* === Performance & Compatibility === */
+		"skipLibCheck": true,
+		"isolatedModules": true,
+		"moduleDetection": "force",
 
-    // Recommended Options
-  
-    "jsx": "react-jsx",
-    "isolatedModules": true,
-    "noUncheckedSideEffectImports": true,
-    "moduleDetection": "force",
-    "skipLibCheck": true,
-  }
+		/* === Imports === */
+		"allowImportingTsExtensions": true,
+		"noUncheckedSideEffectImports": true
+	},
+
+	"include": ["src/**/*", "prisma/**/*"],
+	"exclude": ["node_modules", "dist", "coverage"],
+
+	"ts-node": {
+		"require": ["tsconfig-paths/register"],
+		"transpileOnly": true
+	}
 }

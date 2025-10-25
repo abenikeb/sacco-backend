@@ -1,5 +1,5 @@
-import { prisma } from "../config/prisma.js";
-export async function generateUniqueNumber (
+import { prisma } from "../config/prisma";
+export async function generateUniqueNumber(
 	type: "etNumber" | "memberNumber"
 ): Promise<number> {
 	// Generate a random 5-digit number

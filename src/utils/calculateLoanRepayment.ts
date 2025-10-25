@@ -1,9 +1,8 @@
-import { prisma } from "../config/prisma.js";
+import { prisma } from "../config/prisma";
 export async function createLoanRepayments(loan: any) {
-    
 	const { id, amount, interestRate, tenureMonths } = loan;
 	// const monthlyInterestRate = interestRate / 100 / 12; // this underestimates the interest since it is not suggesting any componding
-    const monthlyInterestRate = Math.pow(1 + interestRate / 100, 1 / 12) - 1;
+	const monthlyInterestRate = Math.pow(1 + interestRate / 100, 1 / 12) - 1;
 
 	const monthlyPayment =
 		(amount *
@@ -19,8 +18,11 @@ export async function createLoanRepayments(loan: any) {
 		const interestPayment = remainingBalance * monthlyInterestRate;
 		const principalPayment = monthlyPayment - interestPayment;
 		remainingBalance -= principalPayment;
-        const repaymentDate = new Date(startDate.getFullYear(), startDate.getMonth() + i, startDate.getDate());
-
+		const repaymentDate = new Date(
+			startDate.getFullYear(),
+			startDate.getMonth() + i,
+			startDate.getDate()
+		);
 
 		repayments.push({
 			loanId: id,
@@ -40,8 +42,9 @@ export async function createLoanRepayments(loan: any) {
 		0
 	);
 	const expectedTotal = monthlyPayment * tenureMonths;
-    const discrepancy = Number((expectedTotal - totalCalculatedAmount).toFixed(2));
-
+	const discrepancy = Number(
+		(expectedTotal - totalCalculatedAmount).toFixed(2)
+	);
 
 	if (discrepancy !== 0) {
 		const lastRepayment = repayments[repayments.length - 1];
@@ -49,9 +52,8 @@ export async function createLoanRepayments(loan: any) {
 
 		// Update the reference to reflect the adjusted principal
 		const [principalStr, interestStr] = lastRepayment!.reference.split(", ");
-        const principalValue = principalStr?.split(": ")[1] ?? "0";
-		const principal =
-			parseFloat(principalValue) + discrepancy;
+		const principalValue = principalStr?.split(": ")[1] ?? "0";
+		const principal = parseFloat(principalValue) + discrepancy;
 		lastRepayment!.reference = `Principal: ${principal.toFixed(
 			2
 		)}, ${interestStr}`;

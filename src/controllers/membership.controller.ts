@@ -1,124 +1,120 @@
-import express from 'express'
-import type { Request, Response } from 'express';
-import { prisma } from '../config/prisma.js';
-import { getSession } from './auth/auth.js';
-import { generateUniqueNumber } from '../utils/generateUnique.js';
-import multer from 'multer';
-import { UserRole } from '@prisma/client';
-import { NotificationPayload, sendNotification } from './notification/notification.controller.js';
-
+import express from "express";
+import type { Request, Response } from "express";
+import { prisma } from "../config/prisma";
+import { getSession } from "./auth/auth";
+import { generateUniqueNumber } from "../utils/generateUnique";
+import multer from "multer";
+import { UserRole } from "@prisma/client";
+import {
+	NotificationPayload,
+	sendNotification,
+} from "./notification/notification.controller";
 
 const membershipRouter = express.Router();
-const APPROVAL_HIERARCHY : UserRole[] = [UserRole.ACCOUNTANT, UserRole.SUPERVISOR, UserRole.MANAGER]
-const upload = multer({dest: 'userInfo/'})
+const APPROVAL_HIERARCHY: UserRole[] = [
+	UserRole.ACCOUNTANT,
+	UserRole.SUPERVISOR,
+	UserRole.MANAGER,
+];
+const upload = multer({ dest: "userInfo/" });
 // middleware
 
+membershipRouter.post(
+	"/request",
+	upload.fields([{ name: "national_id" }, { name: "signature" }]),
+	async (req, res) => {
+		try {
+			const { name, email, phone, etNumber, department, salary } = req.body;
+			const files = req.files as { [fieldname: string]: Express.Multer.File[] };
 
-membershipRouter.post('/request', upload.fields([{ name: 'national_id' }, { name: 'signature' }]), async (req, res) => {
-	try {
-		const { name, email, phone, etNumber, department, salary } = req.body;
-		const files = req.files as { [fieldname: string]: Express.Multer.File[] };
+			const signaturePath = files["signature"]?.[0]?.path ?? "";
+			const nationalIdPath = files["national_id"]?.[0]?.path ?? "";
 
-		const signaturePath = files['signature']?.[0]?.path ?? '';
-		const nationalIdPath = files['national_id']?.[0]?.path ?? '';
+			const membershipRequest = await prisma.membershipRequest.create({
+				data: {
+					name,
+					email,
+					phone,
+					etNumber: Number.parseInt(etNumber),
+					signature: signaturePath, //this should be strings only file paths
+					national_id: nationalIdPath,
+					approvalOrder: 0,
+					salary: parseInt(salary),
+					department,
+					status: "PENDING",
+				},
+			});
+			const accountants = await prisma.user.findMany({
+				where: {
+					role: UserRole.ACCOUNTANT,
+				},
+			});
 
-		const membershipRequest = await prisma.membershipRequest.create({
-			data: {
-				name,
-				email,
-				phone,
-				etNumber: Number.parseInt(etNumber),
-				signature:signaturePath,  //this should be strings only file paths
-				national_id:nationalIdPath,
-				approvalOrder: 0,
-				salary: parseInt(salary),
-				department,
-				status: "PENDING",
-			},
-		});
-		const accountants = await prisma.user.findMany({
-			where : {
-				role : UserRole.ACCOUNTANT
-			}
-		});
-		
-		for (const accountant of accountants) {
-			const message :NotificationPayload  = {
+			for (const accountant of accountants) {
+				const message: NotificationPayload = {
 					userId: accountant.id,
 					title: "Membership Request",
 					message: "Your approval is needed",
-					type: "Membership_APPROVAL"
+					type: "Membership_APPROVAL",
+				};
+				await sendNotification(message);
 			}
-			await sendNotification(message);
-
-			
-		}
-		return res.status(201).json(membershipRequest);
-
-	}
-	catch (error) {
-		console.error("Error creating membership request:", error);
-		return res.status(500).json(
-			{
+			return res.status(201).json(membershipRequest);
+		} catch (error) {
+			console.error("Error creating membership request:", error);
+			return res.status(500).json({
 				error: "Failed to create membership request",
 				details: (error as Error).message,
-			}
-			
-		);
+			});
+		}
 	}
-
-});
-membershipRouter.get('/requests', async(req, res) => {
+);
+membershipRouter.get("/requests", async (req, res) => {
 	const session = await getSession(req);
-	if (!session || session.role === "MEMBER" || session.role === "COMMITTEE"  ) {
+	if (!session || session.role === "MEMBER" || session.role === "COMMITTEE") {
 		return res.status(401).json({ error: "Unauthorized" });
 	}
 	const userRole = session.role;
-	
-	try {
-		if (userRole == 'ACCOUNTANT'){
-		const requests = await prisma.membershipRequest.findMany({
-			where : {
-				approvalOrder: 0
-			},
-			orderBy: { createdAt: "desc" },
-		});
-		return res.json(requests);}
-		else if (userRole == 'SUPERVISOR'){
-		const requests = await prisma.membershipRequest.findMany({
-			where : {
-				approvalOrder: 1
-			},
-			orderBy: { createdAt: "desc" },
-		});
-		return res.json(requests);}
-		else if (userRole == 'MANAGER'){
-		const requests = await prisma.membershipRequest.findMany({
-			where : {
-				approvalOrder: 2
-			},
-			orderBy: { createdAt: "desc" },
-		});
-		return res.json(requests);}
-		
 
+	try {
+		if (userRole == "ACCOUNTANT") {
+			const requests = await prisma.membershipRequest.findMany({
+				where: {
+					approvalOrder: 0,
+				},
+				orderBy: { createdAt: "desc" },
+			});
+			return res.json(requests);
+		} else if (userRole == "SUPERVISOR") {
+			const requests = await prisma.membershipRequest.findMany({
+				where: {
+					approvalOrder: 1,
+				},
+				orderBy: { createdAt: "desc" },
+			});
+			return res.json(requests);
+		} else if (userRole == "MANAGER") {
+			const requests = await prisma.membershipRequest.findMany({
+				where: {
+					approvalOrder: 2,
+				},
+				orderBy: { createdAt: "desc" },
+			});
+			return res.json(requests);
+		}
 	} catch (error) {
 		console.error("Error fetching membership requests:", error);
-		return res.status(500).json(
-			{ error: "Failed to fetch membership requests" }
-
-		);
+		return res
+			.status(500)
+			.json({ error: "Failed to fetch membership requests" });
 	}
-
-
 });
-membershipRouter.patch('/requests/:id', async(req, res) => {
-	
+membershipRouter.patch("/requests/:id", async (req, res) => {
 	const session = await getSession(req);
 	// if (!session || !["SUPERVISOR", "MANAGER"].includes(session.role)) { // I NEED TO CHECK THIS LATER ON
 	// 	return res.status(401).json({ error: "Unauthorized" });
 	// }
-	if (!session || session.role === "MEMBER" || session.role === "COMMITTEE"  ) {
+	if (!session || session.role === "MEMBER" || session.role === "COMMITTEE") {
 		return res.status(401).json({ error: "Unauthorized" });
 	}
 	try {
@@ -129,23 +125,21 @@ membershipRouter.patch('/requests/:id', async(req, res) => {
 
 		const updatedRequest = await prisma.membershipRequest.update({
 			where: { id },
-			data: { 
+			data: {
 				status,
-				approvalOrder: currIndex+1
-
+				approvalOrder: currIndex + 1,
 			},
-			
 		});
-		if ((currIndex + 1) === APPROVAL_HIERARCHY.length) {
+		if (currIndex + 1 === APPROVAL_HIERARCHY.length) {
 			// Get the membership request details
 			// const membershipRequest = await prisma.membershipRequest.findUnique({
 			// 	where: { id },
 			// });
 			const membershipRequest = await prisma.membershipRequest.findUnique({
 				where: {
-					id 
-				},});
-
+					id,
+				},
+			});
 
 			if (membershipRequest) {
 				// Generate unique etNumber and memberNumber
@@ -197,15 +191,12 @@ membershipRouter.patch('/requests/:id', async(req, res) => {
 		}
 
 		return res.json(updatedRequest);
-		
 	} catch (error) {
 		console.error("Error fetching membership requests:", error);
-		return res.status(500).json(
-			{ error: "Failed to update membership request", details: (error as Error).message}
-
-		);
+		return res.status(500).json({
+			error: "Failed to update membership request",
+			details: (error as Error).message,
+		});
 	}
-
-
 });
-export default  membershipRouter
+export default membershipRouter;
