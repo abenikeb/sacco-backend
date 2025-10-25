@@ -195,7 +195,7 @@ membershipRouter.patch("/requests/:id", async (req, res) => {
 
 membershipRouter.get("/requests", async (req, res) => {
 	const session = await getSession(req);
-	if (!session || session.role === "MEMBER" || session.role === "COMMITTEE") {
+	if (!session || session.role === "MEMBER") {
 		return res.status(401).json({ error: "Unauthorized" });
 	}
 	const userRole = session.role;

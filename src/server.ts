@@ -9,7 +9,6 @@ const app = express();
 const server = http.createServer(app);
 initializeSocket(server);
 
-
 app.use(
 	cors({
 		origin: process.env.FRONTEND_URL || "http://94.130.27.32:38443",
@@ -27,7 +26,6 @@ app.use(
 
 app.use(express.json());
 app.use(cookieParser());
-
 
 app.get("/health-check", (req, res) => {
 	res.json({ message: "Server is running" });
