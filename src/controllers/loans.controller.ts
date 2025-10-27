@@ -61,6 +61,8 @@ async function calculateTotalContributions(memberId: number): Promise<number> {
 					TransactionType.MEMBERSHIP_FEE,
 					TransactionType.REGISTRATION_FEE,
 					TransactionType.COST_OF_SHARE,
+					TransactionType.SAVINGS,
+					TransactionType.WILLING_DEPOSIT,
 				],
 			},
 		},
@@ -126,6 +128,25 @@ async function getFirstApproverUserId(): Promise<number | null> {
 	});
 
 	return firstApprover?.id || null;
+}
+
+async function findLoanProductByContributions(
+	totalContributions: number
+): Promise<any | null> {
+	// Find the highest tier product that the member qualifies for
+	const product = await prisma.loanProduct.findFirst({
+		where: {
+			isActive: true,
+			minTotalContributions: {
+				lte: totalContributions, // Member's contributions must be >= product's minimum
+			},
+		},
+		orderBy: {
+			minTotalContributions: "desc", // Get the highest tier they qualify for
+		},
+	});
+
+	return product;
 }
 
 function calculateMonthlyPayment(
@@ -366,40 +387,19 @@ loansRouter.get("/disbursed", async (req, res) => {
 
 loansRouter.post("/apply", upload.single("agreement"), async (req, res) => {
 	const session = await getSession(req);
-
 	if (!session || session.role !== "MEMBER") {
 		return res.status(401).json({ error: "Unauthorized" });
 	}
 
 	try {
-		const {
-			amount,
-			interestRate,
-			tenureMonths,
-			purpose,
-			coSigner1,
-			coSigner2,
-		} = req.body;
+		const { amount, tenureMonths, purpose, coSigner1, coSigner2 } = req.body;
+		console.log({
+			requestBody: req.body,
+		});
 		const agreement = req.file;
 
-		if (!amount || !interestRate || !tenureMonths || !purpose || !agreement) {
+		if (!amount || !tenureMonths || !purpose || !agreement) {
 			return res.status(400).json({ error: "Missing required fields" });
-		}
-
-		const loanAmount = Number.parseFloat(amount);
-		const rate = Number.parseFloat(interestRate);
-		const tenure = Number.parseInt(tenureMonths, 10);
-
-		if (rate !== 9.5) {
-			return res
-				.status(400)
-				.json({ error: "Interest rate must be 9.5% per annum" });
-		}
-
-		if (tenure > 120) {
-			return res
-				.status(400)
-				.json({ error: "Loan tenure cannot exceed 120 months (10 years)" });
 		}
 
 		const member = await prisma.member.findUnique({
@@ -423,29 +423,57 @@ loansRouter.post("/apply", upload.single("agreement"), async (req, res) => {
 		const totalContributions = await calculateTotalContributions(member.id);
 		const monthlySalary = member.salary || 0;
 
-		const activeLoanBalance = await getActiveLoanBalance(member.id);
-		const hasActiveLoan = activeLoanBalance !== null;
+		const loanProduct =
+			await findLoanProductByContributions(totalContributions);
 
-		if (tenure > 120) {
+		if (!loanProduct) {
 			return res.status(400).json({
-				error: "Loan tenure cannot exceed 120 months (10 years)",
-				requirement: "Max Loan Term",
+				error: `You do not qualify for any loan product. Minimum total contributions required: ${(await prisma.loanProduct.findFirst({ where: { isActive: true }, orderBy: { minTotalContributions: "asc" } }))?.minTotalContributions || 0} ETB. Your current contributions: ${totalContributions.toLocaleString()} ETB`,
+				requirement: "Minimum Total Contributions",
+				minimumRequired:
+					(
+						await prisma.loanProduct.findFirst({
+							where: { isActive: true },
+							orderBy: { minTotalContributions: "asc" },
+						})
+					)?.minTotalContributions || 0,
+				currentContributions: totalContributions,
 			});
 		}
 
-		const maxLoanBasedOnSalary = monthlySalary * 30;
+		const loanAmount = Number.parseFloat(amount);
+		const tenure = Number.parseInt(tenureMonths, 10);
+
+		if (
+			tenure < loanProduct.minDurationMonths ||
+			tenure > loanProduct.maxDurationMonths + 1
+		) {
+			return res.status(400).json({
+				error: `Loan tenure must be between ${loanProduct.minDurationMonths} and ${loanProduct.maxDurationMonths} months for ${loanProduct.name}`,
+				requirement: "Max Loan Term",
+				min: loanProduct.minDurationMonths,
+				max: loanProduct.maxDurationMonths,
+			});
+		}
+
+		const activeLoanBalance = await getActiveLoanBalance(member.id);
+		const hasActiveLoan = activeLoanBalance !== null;
+
+		const maxLoanBasedOnSalary =
+			monthlySalary * loanProduct.maxLoanBasedOnSalaryMonths;
 		if (loanAmount > maxLoanBasedOnSalary) {
 			return res.status(400).json({
-				error: `Loan amount exceeds maximum limit based on salary. Maximum: ${maxLoanBasedOnSalary.toLocaleString()} ETB (30 months of salary)`,
+				error: `Loan amount exceeds maximum limit based on salary. Maximum: ${maxLoanBasedOnSalary.toLocaleString()} ETB (${loanProduct.maxLoanBasedOnSalaryMonths} months of salary)`,
 				requirement: "Loan Limit Based on Salary",
 				maxAllowed: maxLoanBasedOnSalary,
 			});
 		}
 
-		const requiredSavingsBeforeLoan = loanAmount * 0.3;
+		const requiredSavingsBeforeLoan =
+			loanAmount * (Number(loanProduct.requiredSavingsPercentage) / 100);
 		if (totalSavings < requiredSavingsBeforeLoan) {
 			return res.status(400).json({
-				error: `Insufficient savings. Required: ${requiredSavingsBeforeLoan.toLocaleString()} ETB (30% of loan amount), Available: ${totalSavings.toLocaleString()} ETB`,
+				error: `Insufficient savings. Required: ${requiredSavingsBeforeLoan.toLocaleString()} ETB (${loanProduct.requiredSavingsPercentage}% of loan amount), Available: ${totalSavings.toLocaleString()} ETB`,
 				requirement: "Savings Requirement Before Loan Approval",
 				required: requiredSavingsBeforeLoan,
 				available: totalSavings,
@@ -453,9 +481,8 @@ loansRouter.post("/apply", upload.single("agreement"), async (req, res) => {
 		}
 
 		if (hasActiveLoan) {
-			const requiredMonthlySavings = monthlySalary * 0.35;
-			// Note: This is a validation that the member must continue saving 35% during active loan
-			// The actual enforcement happens during repayment tracking
+			const requiredMonthlySavings =
+				monthlySalary * (Number(loanProduct.requiredSavingsDuringLoan) / 100);
 			if (monthlySalary === 0) {
 				return res.status(400).json({
 					error:
@@ -492,9 +519,10 @@ loansRouter.post("/apply", upload.single("agreement"), async (req, res) => {
 		const loan = await prisma.loan.create({
 			data: {
 				memberId: member.id,
+				loanProductId: loanProduct.id,
 				amount: loanAmount,
 				remainingAmount: loanAmount,
-				interestRate: rate,
+				interestRate: loanProduct.interestRate,
 				tenureMonths: tenure,
 				status: "PENDING",
 				loanDocuments: {
@@ -511,9 +539,9 @@ loansRouter.post("/apply", upload.single("agreement"), async (req, res) => {
 					create: {
 						role: "MEMBER" as UserRole,
 						status: "PENDING",
-						approvedByUserId: Number(process.env.ADMIN_ID),
+						approvedByUserId: session.id,
 						approvalOrder: 0,
-						comments: `Loan application submitted. Amount: ${loanAmount.toLocaleString()} ETB. Purpose: ${purpose}. Co-signers: ${
+						comments: `Loan application submitted. Product: ${loanProduct.name} (auto-assigned based on ${totalContributions.toLocaleString()} ETB total contributions). Amount: ${loanAmount.toLocaleString()} ETB. Purpose: ${purpose}. Co-signers: ${
 							coSigner1 ? `ID:${coSigner1}` : "None"
 						}, ${coSigner2 ? `ID:${coSigner2}` : "None"}. Savings: ${totalSavings.toLocaleString()} ETB. Monthly Salary: ${monthlySalary.toLocaleString()} ETB`,
 					} as any,
@@ -528,19 +556,10 @@ loansRouter.post("/apply", upload.single("agreement"), async (req, res) => {
 			await sendNotification({
 				userId: firstApproverId,
 				title: "New Loan Application Pending Review",
-				message: `New loan application (ID: ${loan.id}) for ${loanAmount.toLocaleString()} ETB submitted by ${member.name}. Savings: ${totalSavings.toLocaleString()} ETB (${((totalSavings / loanAmount) * 100).toFixed(1)}% of loan amount). Awaiting your review.`,
+				message: `New loan application (ID: ${loan.id}) for ${loanAmount.toLocaleString()} ETB (${loanProduct.name}) submitted by ${member.name}. Savings: ${totalSavings.toLocaleString()} ETB (${((totalSavings / loanAmount) * 100).toFixed(1)}% of loan amount). Awaiting your review.`,
 				type: "LOAN_APPLICATION_SUBMITTED",
 			});
 		}
-
-		// await prisma.notification.create({
-		// 	data: {
-		// 		userId: Number(process.env.ADMIN_ID || 1),
-		// 		title: "New Loan Application",
-		// 		message: `New loan application for ${loanAmount.toLocaleString()} ETB submitted by ${member.name}. Savings: ${totalSavings.toLocaleString()} ETB (${((totalSavings / loanAmount) * 100).toFixed(1)}% of loan amount)`,
-		// 		type: "LOAN_APPLICATION_SUBMITTED",
-		// 	} as any,
-		// });
 
 		return res.json({
 			success: true,
@@ -549,9 +568,14 @@ loansRouter.post("/apply", upload.single("agreement"), async (req, res) => {
 			message: "Loan application submitted successfully",
 			loanDetails: {
 				amount: loanAmount,
-				interestRate: rate,
+				productName: loanProduct.name,
+				interestRate: Number(loanProduct.interestRate),
 				tenureMonths: tenure,
-				monthlyPayment: calculateMonthlyPayment(loanAmount, rate, tenure),
+				monthlyPayment: calculateMonthlyPayment(
+					loanAmount,
+					Number(loanProduct.interestRate),
+					tenure
+				),
 			},
 		});
 	} catch (error) {
@@ -564,6 +588,7 @@ loansRouter.post("/apply", upload.single("agreement"), async (req, res) => {
 
 // loansRouter.post("/apply", upload.single("agreement"), async (req, res) => {
 // 	const session = await getSession(req);
+
 // 	if (!session || session.role !== "MEMBER") {
 // 		return res.status(401).json({ error: "Unauthorized" });
 // 	}
@@ -578,25 +603,30 @@ loansRouter.post("/apply", upload.single("agreement"), async (req, res) => {
 // 			coSigner2,
 // 		} = req.body;
 // 		const agreement = req.file;
+
 // 		if (!amount || !interestRate || !tenureMonths || !purpose || !agreement) {
 // 			return res.status(400).json({ error: "Missing required fields" });
 // 		}
-// 		const loanAmount = parseFloat(amount);
-// 		const rate = parseFloat(interestRate);
-// 		const tenure = parseInt(tenureMonths, 10);
+
+// 		const loanAmount = Number.parseFloat(amount);
+// 		const rate = Number.parseFloat(interestRate);
+// 		const tenure = Number.parseInt(tenureMonths, 10);
+
 // 		if (rate !== 9.5) {
-// 			return res.status(400).json({ error: "Interest rate must be 9.5%" });
-// 		}
-// 		if (tenure !== 120) {
 // 			return res
 // 				.status(400)
-// 				.json({ error: "Loan tenure must be 120 months (10 years)" });
+// 				.json({ error: "Interest rate must be 9.5% per annum" });
+// 		}
+
+// 		if (tenure > 120) {
+// 			return res
+// 				.status(400)
+// 				.json({ error: "Loan tenure cannot exceed 120 months (10 years)" });
 // 		}
 
 // 		const member = await prisma.member.findUnique({
 // 			where: { id: session.id! },
 // 			include: {
-// 				balance: true,
 // 				loans: {
 // 					where: {
 // 						status: {
@@ -606,39 +636,70 @@ loansRouter.post("/apply", upload.single("agreement"), async (req, res) => {
 // 				},
 // 			},
 // 		});
+
 // 		if (!member) {
 // 			return res.status(404).json({ error: "Member not found" });
 // 		}
-// 		const monthlySalary = member.salary; // This should come from member data
-// 		const maxLoanBasedOnSalary = monthlySalary * 30;
-// 		const hasActiveLoan = member.loans.length > 0;
-// 		const requiredContributionRate = hasActiveLoan ? 0.35 : 0.3;
-// 		const totalContribution = Number(member.balance?.totalContributions || 0);
-// 		const maxLoanBasedOnContribution =
-// 			totalContribution / requiredContributionRate;
-// 		const maxLoanAmount = Math.min(
-// 			maxLoanBasedOnSalary,
-// 			maxLoanBasedOnContribution
-// 		);
-// 		const requiredContribution = loanAmount * requiredContributionRate;
 
-// 		// Validate loan amount against limits
-// 		if (loanAmount > maxLoanAmount) {
+// 		const totalSavings = await calculateTotalSavings(member.id);
+// 		const totalContributions = await calculateTotalContributions(member.id);
+// 		const monthlySalary = member.salary || 0;
+
+// 		const activeLoanBalance = await getActiveLoanBalance(member.id);
+// 		const hasActiveLoan = activeLoanBalance !== null;
+
+// 		if (tenure > 120) {
 // 			return res.status(400).json({
-// 				error: `Loan amount exceeds maximum limit of ${maxLoanAmount.toLocaleString()} ETB`,
+// 				error: "Loan tenure cannot exceed 120 months (10 years)",
+// 				requirement: "Max Loan Term",
 // 			});
 // 		}
-// 		if (totalContribution < requiredContribution) {
+
+// 		const maxLoanBasedOnSalary = monthlySalary * 30;
+// 		if (loanAmount > maxLoanBasedOnSalary) {
 // 			return res.status(400).json({
-// 				error: `Insufficient contribution. Required: ${requiredContribution.toLocaleString()} ETB, Available: ${totalContribution.toLocaleString()} ETB`,
+// 				error: `Loan amount exceeds maximum limit based on salary. Maximum: ${maxLoanBasedOnSalary.toLocaleString()} ETB (30 months of salary)`,
+// 				requirement: "Loan Limit Based on Salary",
+// 				maxAllowed: maxLoanBasedOnSalary,
 // 			});
 // 		}
+
+// 		const requiredSavingsBeforeLoan = loanAmount * 0.3;
+// 		if (totalSavings < requiredSavingsBeforeLoan) {
+// 			return res.status(400).json({
+// 				error: `Insufficient savings. Required: ${requiredSavingsBeforeLoan.toLocaleString()} ETB (30% of loan amount), Available: ${totalSavings.toLocaleString()} ETB`,
+// 				requirement: "Savings Requirement Before Loan Approval",
+// 				required: requiredSavingsBeforeLoan,
+// 				available: totalSavings,
+// 			});
+// 		}
+
+// 		if (hasActiveLoan) {
+// 			const requiredMonthlySavings = monthlySalary * 0.35;
+// 			// Note: This is a validation that the member must continue saving 35% during active loan
+// 			// The actual enforcement happens during repayment tracking
+// 			if (monthlySalary === 0) {
+// 				return res.status(400).json({
+// 					error:
+// 						"Cannot apply for additional loan without valid salary information",
+// 					requirement: "Active Loan Savings Requirement",
+// 				});
+// 			}
+// 		}
+
+// 		if (hasActiveLoan) {
+// 			return res.status(400).json({
+// 				error: `You have an active loan with remaining balance of ${activeLoanBalance!.remainingBalance.toLocaleString()} ETB. Please repay the existing loan before applying for a new one.`,
+// 				requirement: "Active Loan Balance Tracking",
+// 				activeLoan: activeLoanBalance,
+// 			});
+// 		}
+
 // 		const fileExtension = path.extname(agreement.originalname);
-// 		const fileName = `loan_agreement_${Date.now()}_${
-// 			member.id
-// 		}${fileExtension}`;
+// 		const fileName = `loan_agreement_${Date.now()}_${member.id}${fileExtension}`;
 // 		const uploadDir = path.join(process.cwd(), "public", "loan_agreements");
 // 		const filePath = path.join(uploadDir, fileName);
+
 // 		try {
 // 			await mkdir(uploadDir, { recursive: true });
 // 		} catch (err) {
@@ -646,8 +707,10 @@ loansRouter.post("/apply", upload.single("agreement"), async (req, res) => {
 // 				throw err;
 // 			}
 // 		}
+
 // 		await writeFile(filePath, agreement.buffer);
 // 		const documentUrl = `/loan_agreements/${fileName}`;
+
 // 		const loan = await prisma.loan.create({
 // 			data: {
 // 				memberId: member.id,
@@ -670,31 +733,48 @@ loansRouter.post("/apply", upload.single("agreement"), async (req, res) => {
 // 					create: {
 // 						role: "MEMBER" as UserRole,
 // 						status: "PENDING",
-// 						approvedByUserId: session.id,
+// 						approvedByUserId: Number(process.env.ADMIN_ID),
 // 						approvalOrder: 0,
-// 						comments: `Loan application submitted. Purpose: ${purpose}. Co-signers: ${
+// 						comments: `Loan application submitted. Amount: ${loanAmount.toLocaleString()} ETB. Purpose: ${purpose}. Co-signers: ${
 // 							coSigner1 ? `ID:${coSigner1}` : "None"
-// 						}, ${coSigner2 ? `ID:${coSigner2}` : "None"}`,
+// 						}, ${coSigner2 ? `ID:${coSigner2}` : "None"}. Savings: ${totalSavings.toLocaleString()} ETB. Monthly Salary: ${monthlySalary.toLocaleString()} ETB`,
 // 					} as any,
 // 				},
 // 			},
 // 		});
-// 		if (!loan) throw Error("can't create the loan");
-// 		await prisma.notification.create({
-// 			data: {
-// 				userId: Number(process.env.ADMIN_ID || 1),
-// 				title: "New Loan Application",
-// 				message: `New loan application for ${loanAmount.toLocaleString()} ETB submitted by ${
-// 					member.name
-// 				}`,
+
+// 		if (!loan) throw Error("Failed to create loan");
+
+// 		const firstApproverId = await getFirstApproverUserId();
+// 		if (firstApproverId) {
+// 			await sendNotification({
+// 				userId: firstApproverId,
+// 				title: "New Loan Application Pending Review",
+// 				message: `New loan application (ID: ${loan.id}) for ${loanAmount.toLocaleString()} ETB submitted by ${member.name}. Savings: ${totalSavings.toLocaleString()} ETB (${((totalSavings / loanAmount) * 100).toFixed(1)}% of loan amount). Awaiting your review.`,
 // 				type: "LOAN_APPLICATION_SUBMITTED",
-// 			} as any,
-// 		});
+// 			});
+// 		}
+
+// 		// await prisma.notification.create({
+// 		// 	data: {
+// 		// 		userId: Number(process.env.ADMIN_ID || 1),
+// 		// 		title: "New Loan Application",
+// 		// 		message: `New loan application for ${loanAmount.toLocaleString()} ETB submitted by ${member.name}. Savings: ${totalSavings.toLocaleString()} ETB (${((totalSavings / loanAmount) * 100).toFixed(1)}% of loan amount)`,
+// 		// 		type: "LOAN_APPLICATION_SUBMITTED",
+// 		// 	} as any,
+// 		// });
+
 // 		return res.json({
 // 			success: true,
 // 			loanId: loan.id,
 // 			documentUrl: documentUrl,
 // 			message: "Loan application submitted successfully",
+// 			loanDetails: {
+// 				amount: loanAmount,
+// 				interestRate: rate,
+// 				tenureMonths: tenure,
+// 				monthlyPayment: calculateMonthlyPayment(loanAmount, rate, tenure),
+// 			},
 // 		});
 // 	} catch (error) {
 // 		console.error("Error processing loan application:", error);

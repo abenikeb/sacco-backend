@@ -59,7 +59,7 @@ async function calculateActiveLoanBalance(memberId: any) {
 		where: {
 			memberId,
 			status: {
-				in: ["PENDING", "APPROVED", "DISBURSED"],
+				in: ["DISBURSED"],
 			},
 		},
 		include: {
@@ -235,98 +235,6 @@ membersRouter.get("/loan-eligibility", async (req, res) => {
 		});
 	}
 });
-
-// membersRouter.get("/loans", async (req, res) => {
-// 	const session = await getSession(req);
-
-// 	if (!session || session.role !== "MEMBER" || !session.id) {
-// 		return res.status(401).json("Unauthroized");
-// 	}
-// 	try {
-// 		const loans = await prisma.loan.findMany({
-// 			where: {
-// 				memberId: session.id,
-// 			},
-// 			include: {
-// 				approvalLogs: {
-// 					select: {
-// 						id: true,
-// 						status: true,
-// 						approvalDate: true,
-// 						comments: true,
-// 						role: true,
-// 					},
-// 					orderBy: {
-// 						approvalDate: "desc",
-// 					},
-// 				},
-// 				loanRepayments: {
-// 					select: {
-// 						id: true,
-// 						amount: true,
-// 						repaymentDate: true,
-// 						reference: true,
-// 						sourceType: true,
-// 						status: true,
-// 					},
-// 					orderBy: {
-// 						repaymentDate: "asc",
-// 					},
-// 				},
-// 			},
-// 			orderBy: {
-// 				createdAt: "desc",
-// 			},
-// 		});
-
-// 		return res.json(loans);
-// 	} catch (error) {
-// 		console.error("Error fetching loan details:", error);
-// 		return res.status(500).json({
-// 			error: "Failed to fetch loans",
-// 			message: error instanceof Error ? error.message : "Unknown error",
-// 		});
-// 	}
-// });
-
-// membersRouter.get("/loan-eligibility", async (req, res) => {
-// 	const session = await getSession(req);
-// 	if (!session) {
-// 		return res.status(401).json({ error: "Unauthorized" });
-// 	}
-
-// 	try {
-// 		const member = await prisma.member.findUnique({
-// 			where: { id: session.id! },
-// 			include: {
-// 				balance: true,
-// 				loans: {
-// 					where: {
-// 						status: {
-// 							in: ["PENDING", "APPROVED", "DISBURSED"],
-// 						},
-// 					},
-// 				},
-// 			},
-// 		});
-
-// 		if (!member) {
-// 			return res.status(404).json({ error: "Member not found" });
-// 		}
-// 		const monthlySalary = member.salary; // This should be fetched from member.salary or similar field
-// 		const totalContribution = member.balance?.totalContributions || 0; // this will become 0 coelecing will return 0
-// 		const hasActiveLoan = member.loans.length > 0;
-
-// 		return res.json({
-// 			totalContribution: Number(totalContribution),
-// 			monthlySalary,
-// 			hasActiveLoan,
-// 		});
-// 	} catch (err) {
-// 		console.log("Eligibility " + err);
-// 		return res.json({ error: err });
-// 	}
-// });
 
 membersRouter.get("/loans/documents", async (req, res) => {
 	const session = await getSession(req);
@@ -827,6 +735,31 @@ membersRouter.get("/:etNumber", async (req, res) => {
 				loanRepaymentProgress,
 			},
 		});
+	} catch (error) {
+		console.error("Error fetching member details:", error);
+		return res.status(500).json({
+			error: "Failed to fetch member details",
+			message: error instanceof Error ? error.message : "Unknown error",
+		});
+	}
+});
+
+membersRouter.get("/current/user", async (req, res) => {
+	const session = await getSession(req);
+	if (!session) {
+		return res.status(401).json({ error: "Unauthorized" });
+	}
+
+	try {
+		const member = await prisma.member.findUnique({
+			where: { id: session.id },
+		});
+		console.log("the member fetched ", member);
+
+		if (!member) {
+			return res.status(404).json({ error: "Member not found" });
+		}
+		return res.status(200).json(member);
 	} catch (error) {
 		console.error("Error fetching member details:", error);
 		return res.status(500).json({

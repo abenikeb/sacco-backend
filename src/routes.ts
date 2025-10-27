@@ -12,6 +12,10 @@ import {
 	fetchMembers,
 	importMembers,
 } from "@/src/controllers/memberController";
+import loanProductsRouter from "./controllers/loanProducts.controller";
+import withdrawalsRouter from "./controllers/withdrawals.controller";
+import accountingRouter from "./controllers/accounting.controller";
+import analyticsRouter from "./controllers/analytics.controller";
 // import reportRouter from './controllers/report.controller';
 // import salaryRouter from './controllers/importSalary.controller';
 const router = Router();
@@ -21,6 +25,11 @@ router.use("/loans", loansRouter);
 router.use("/members", membersRouter);
 router.use("/membership", membershipRouter);
 router.use("/notifications", notificationRouter);
+router.use("/loan-products", loanProductsRouter);
+router.use("/withdrawals", withdrawalsRouter);
+router.use("/accounting", accountingRouter);
+router.use("/analytics", analyticsRouter);
+
 // router.use('/report', reportRouter);
 // router.use('/importSalary', salaryRouter);
 

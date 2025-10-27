@@ -4,6 +4,8 @@ import {
 	createJournalEntry,
 	mapToAccountingType,
 } from "../utils/accountingUtils";
+import { AccountingService } from "./accountingService";
+const accountingService = new AccountingService();
 
 export class MemberService {
 	async importMembers(membersData = []) {
@@ -85,21 +87,46 @@ export class MemberService {
 							transactionDate: jsDate,
 						}));
 
-					if (txList.length > 0)
-						await tx.transaction.createMany({ data: txList });
-
-					// Create Journal Entries
-					const currentDate = new Date().toISOString().split("T")[0];
-					for (const t of txList) {
-						await createJournalEntry({
-							type: mapToAccountingType(t.type),
-							amount: Number(t.amount),
-							interest: 50,
-							date: currentDate,
-							reference: `REF-${t.type}-${member.name}-${currentDate}`,
-							journalId: 3,
+					if (txList.length > 0) {
+						const transactions = await tx.transaction.createMany({
+							data: txList,
 						});
+
+						for (const t of txList) {
+							const reference = `REF-${t.type}-${member.name}-${jsDate.toISOString().split("T")[0]}`;
+
+							if (
+								t.type === "SAVINGS" ||
+								t.type === "WILLING_DEPOSIT" ||
+								t.type === "REGISTRATION_FEE" ||
+								t.type === "MEMBERSHIP_FEE" ||
+								t.type === "COST_OF_SHARE"
+							) {
+								// Record as savings/deposit
+								await accountingService.recordSavingsTransaction(
+									member.id,
+									Number(t.amount),
+									jsDate,
+									reference
+								);
+							}
+						}
 					}
+					// if (txList.length > 0)
+					// 	await tx.transaction.createMany({ data: txList });
+
+					// // Create Journal Entries
+					// const currentDate = new Date().toISOString().split("T")[0];
+					// for (const t of txList) {
+					// 	await createJournalEntry({
+					// 		type: mapToAccountingType(t.type),
+					// 		amount: Number(t.amount),
+					// 		interest: 50,
+					// 		date: currentDate,
+					// 		reference: `REF-${t.type}-${member.name}-${currentDate}`,
+					// 		journalId: 3,
+					// 	});
+					// }
 
 					count++;
 				} catch (err) {
@@ -167,14 +194,25 @@ export class MemberService {
 			});
 
 			const currentDate = new Date().toISOString().split("T")[0];
-			await createJournalEntry({
-				type: mapToAccountingType(TransactionType.LOAN_REPAYMENT),
-				amount: repaymentAmount,
-				interest: 50,
-				date: currentDate,
-				reference: `${TransactionType.LOAN_REPAYMENT}-${memberId}-${repaymentDate.toISOString()}`,
-				journalId: 3,
-			});
+			const interestRate = Number(activeLoan.interestRate) / 100;
+			const interestAmount = repaymentAmount * interestRate;
+			const principalAmount = repaymentAmount - interestAmount;
+
+			await accountingService.recordLoanRepayment(
+				memberId,
+				principalAmount,
+				interestAmount,
+				repaymentDate,
+				reference
+			);
+			// await createJournalEntry({
+			// 	type: mapToAccountingType(TransactionType.LOAN_REPAYMENT),
+			// 	amount: repaymentAmount,
+			// 	interest: 50,
+			// 	date: currentDate,
+			// 	reference: `${TransactionType.LOAN_REPAYMENT}-${memberId}-${repaymentDate.toISOString()}`,
+			// 	journalId: 3,
+			// });
 		}
 
 		// Update remaining loan balance
