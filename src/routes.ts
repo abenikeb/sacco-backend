@@ -16,6 +16,7 @@ import loanProductsRouter from "./controllers/loanProducts.controller";
 import withdrawalsRouter from "./controllers/withdrawals.controller";
 import accountingRouter from "./controllers/accounting.controller";
 import analyticsRouter from "./controllers/analytics.controller";
+import settingsRouter from "./controllers/settings.controller";
 // import reportRouter from './controllers/report.controller';
 // import salaryRouter from './controllers/importSalary.controller';
 const router = Router();
@@ -29,6 +30,7 @@ router.use("/loan-products", loanProductsRouter);
 router.use("/withdrawals", withdrawalsRouter);
 router.use("/accounting", accountingRouter);
 router.use("/analytics", analyticsRouter);
+router.use("/settings", settingsRouter);
 
 // router.use('/report', reportRouter);
 // router.use('/importSalary', salaryRouter);
