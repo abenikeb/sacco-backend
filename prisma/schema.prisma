@@ -18,6 +18,7 @@ model Member {
   department     String?
   section        String?
   group          String?
+  withdrawalRequests       WithdrawalRequest[]
   transactions   Transaction[]
   savings        Savings[]
   loans          Loan[]
@@ -35,7 +36,6 @@ model Member {
   @@index([section])
   @@index([group])
 }
-
 
 model MemberHistory {
   id            Int      @id @default(autoincrement())
@@ -92,6 +92,7 @@ model Transaction {
   id              Int             @id @default(autoincrement())
   memberId        Int
   type            TransactionType
+  journalEntries  JournalEntry[] 
   amount          Decimal
   reference       String?
   transactionDate DateTime        @default(now())
@@ -103,21 +104,83 @@ model Transaction {
   @@index([type, transactionDate])
 }
 
+model LoanProduct {
+  id                          Int      @id @default(autoincrement())
+  name                        String   @unique
+  description                 String?
+  interestRate                Decimal  @default(9.5)
+  minDurationMonths           Int      @default(1)
+  maxDurationMonths           Int      @default(120)
+  requiredSavingsPercentage   Decimal  @default(30) // 30% of loan amount
+  requiredSavingsDuringLoan   Decimal  @default(35) // 35% of monthly income
+  maxLoanBasedOnSalaryMonths  Int      @default(30) // 30 months of salary
+  minTotalContributions       Decimal  @default(0) // Minimum total contributions required to qualify for this product
+  isActive                    Boolean  @default(true)
+  createdAt                   DateTime @default(now())
+  updatedAt                   DateTime @updatedAt
+  loans                       Loan[]
+
+  @@index([isActive])
+  @@index([minTotalContributions]) // Index for efficient product lookup by contributions
+}
+
 model Loan {
-  id             Int               @id @default(autoincrement())
-  memberId       Int
-  amount         Decimal
-  remainingAmount Decimal?
-  order           Int              @default(0)
-  interestRate   Decimal
-  tenureMonths   Int
-  status         LoanApprovalStatus
-  approvalLogs   LoanApprovalLog[]
-  loanRepayments LoanRepayment[]
-  loanDocuments  LoanDocument[]
-  member         Member            @relation(fields: [memberId], references: [id])
-  createdAt      DateTime          @default(now())
-  updatedAt      DateTime          @updatedAt
+  id                Int               @id @default(autoincrement())
+  memberId          Int
+  loanProductId     Int               // Add reference to LoanProduct
+  amount            Decimal
+  remainingAmount   Decimal?
+  order             Int               @default(0)
+  interestRate      Decimal
+  tenureMonths      Int
+  status            LoanApprovalStatus
+  approvalLogs      LoanApprovalLog[]
+  loanRepayments    LoanRepayment[]
+  loanDocuments     LoanDocument[]
+  member            Member            @relation(fields: [memberId], references: [id])
+  loanProduct       LoanProduct       @relation(fields: [loanProductId], references: [id]) // Add relation
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+}
+
+enum WithdrawalApprovalStatus {
+  PENDING
+  APPROVED_BY_ACCOUNTANT
+  APPROVED_BY_SUPERVISOR
+  APPROVED_BY_MANAGER
+  REJECTED
+  DISBURSED
+}
+
+model WithdrawalRequest {
+  id                    Int                       @id @default(autoincrement())
+  memberId              Int
+  amount                Decimal
+  requestedAmount       Decimal                   // Original requested amount
+  approvalStatus        WithdrawalApprovalStatus  @default(PENDING)
+  approvalLogs          WithdrawalApprovalLog[]
+  member                Member                    @relation(fields: [memberId], references: [id])
+  createdAt             DateTime                  @default(now())
+  updatedAt             DateTime                  @updatedAt
+
+  @@index([memberId])
+  @@index([approvalStatus])
+  @@index([createdAt])
+}
+
+model WithdrawalApprovalLog {
+  id                    Int                       @id @default(autoincrement())
+  withdrawalRequestId   Int
+  approvedByUserId      Int
+  approvalLevel         String                    // ACCOUNTANT, SUPERVISOR, MANAGER
+  status                WithdrawalApprovalStatus
+  remarks               String?
+  withdrawalRequest     WithdrawalRequest         @relation(fields: [withdrawalRequestId], references: [id], onDelete: Cascade)
+  approvedByUser        User                      @relation(fields: [approvedByUserId], references: [id])
+  createdAt             DateTime                  @default(now())
+
+  @@index([withdrawalRequestId])
+  @@index([approvedByUserId])
 }
 
 model LoanRepayment {
@@ -133,7 +196,6 @@ model LoanRepayment {
   createdAt     DateTime            @default(now())
   updatedAt     DateTime            @updatedAt
 }
-
 
 model LoanApprovalLog {
   id               Int                @id @default(autoincrement())
@@ -171,16 +233,17 @@ model User {
   email           String            @unique
   phone           String            @unique
   password        String
+  
   role            UserRole
   member          Member?
   loanApprovals   LoanApprovalLog[]
   uploadedDocs    LoanDocument[]
+  withdrawalApprovals     WithdrawalApprovalLog[]
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @updatedAt
 
   Notification Notification[]
 }
-
 
 enum TransactionType {
   SAVINGS
@@ -241,6 +304,9 @@ enum NotificationType {
   LOAN_REPAYMENT_RECEIVED
   SAVINGS_UPDATE
   ACCOUNT_UPDATE
+  WITHDRAWAL_APPROVAL
+  WITHDRAWAL_APPROVED
+  WITHDRAWAL_REQUEST
   GENERAL
 }
 
@@ -248,4 +314,96 @@ enum RepaymentStatus {
   PENDING
   PAID
   OVERDUE
+}
+
+//chart of accounts
+model ChartOfAccounts {
+  id              Int      @id @default(autoincrement())
+  code            String   @unique // e.g., "1001", "2001"
+  name            String   // e.g., "Cash", "Bank Account"
+  accountType     AccountType
+  description     String?
+  isActive        Boolean  @default(true)
+  parentAccountId Int?
+  parentAccount   ChartOfAccounts? @relation("ParentChild", fields: [parentAccountId], references: [id])
+  childAccounts   ChartOfAccounts[] @relation("ParentChild")
+  journalLines    JournalLine[]
+  ledgerEntries   GeneralLedger[]
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([accountType])
+  @@index([isActive])
+}
+
+model JournalEntry {
+  id              Int      @id @default(autoincrement())
+  journalId       Int      @default(3) // Default journal
+  entryNumber     String   @unique // Auto-generated reference
+  entryDate       DateTime
+  description     String
+  reference       String?  // Transaction reference
+  transactionId   Int?     // Link to Transaction
+  transaction     Transaction? @relation(fields: [transactionId], references: [id])
+  totalDebit      Decimal  @default(0)
+  totalCredit     Decimal  @default(0)
+  isBalanced      Boolean  @default(false)
+  status          JournalStatus @default(DRAFT)
+  journalLines    JournalLine[]
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([entryDate])
+  @@index([status])
+  @@index([transactionId])
+  GeneralLedger GeneralLedger[]
+}
+
+model JournalLine {
+  id              Int      @id @default(autoincrement())
+  journalEntryId  Int
+  journalEntry    JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+  accountId       Int
+  account         ChartOfAccounts @relation(fields: [accountId], references: [id])
+  debit           Decimal  @default(0)
+  credit          Decimal  @default(0)
+  description     String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([journalEntryId])
+  @@index([accountId])
+}
+
+model GeneralLedger {
+  id              Int      @id @default(autoincrement())
+  accountId       Int
+  account         ChartOfAccounts @relation(fields: [accountId], references: [id])
+  journalEntryId  Int
+  journalEntry    JournalEntry @relation(fields: [journalEntryId], references: [id])
+  debit           Decimal  @default(0)
+  credit          Decimal  @default(0)
+  balance         Decimal  @default(0)
+  transactionDate DateTime
+  description     String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([accountId, transactionDate])
+  @@index([journalEntryId])
+}
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  INCOME
+  REVENUE
+  EXPENSE
+}
+
+enum JournalStatus {
+  DRAFT
+  POSTED
+  REVERSED
 }
