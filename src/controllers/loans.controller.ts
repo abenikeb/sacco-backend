@@ -393,9 +393,6 @@ loansRouter.post("/apply", upload.single("agreement"), async (req, res) => {
 
 	try {
 		const { amount, tenureMonths, purpose, coSigner1, coSigner2 } = req.body;
-		console.log({
-			requestBody: req.body,
-		});
 		const agreement = req.file;
 
 		if (!amount || !tenureMonths || !purpose || !agreement) {
