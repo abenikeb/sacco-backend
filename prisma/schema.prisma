@@ -233,8 +233,10 @@ model User {
   email           String            @unique
   phone           String            @unique
   password        String
-  
-  role            UserRole
+
+  role            UserRole          @default(MEMBER) // Keep for backward compatibility
+  roleId          Int?              // New dynamic role reference
+  userRole        Role?             @relation(fields: [roleId], references: [id])
   member          Member?
   loanApprovals   LoanApprovalLog[]
   uploadedDocs    LoanDocument[]
@@ -243,6 +245,14 @@ model User {
   updatedAt       DateTime          @updatedAt
 
   Notification Notification[]
+}
+
+enum UserRole {
+  MEMBER
+  ACCOUNTANT
+  MANAGER
+  SUPERVISOR
+  COMMITTEE
 }
 
 enum TransactionType {
@@ -264,13 +274,7 @@ enum LoanApprovalStatus {
   PENDING
 }
 
-enum UserRole {
-  MEMBER
-  ACCOUNTANT
-  MANAGER
-  SUPERVISOR
-  COMMITTEE
-}
+
 
 enum RepaymentSourceType {
   ERP_PAYROLL
@@ -406,4 +410,84 @@ enum JournalStatus {
   DRAFT
   POSTED
   REVERSED
+}
+
+//Permission
+enum PermissionAction {
+  VIEW
+  READ
+  CREATE
+  UPDATE
+  DELETE
+  APPROVE
+  REJECT
+}
+
+enum PermissionResource {
+  MEMBERS
+  LOANS
+  SAVINGS
+  TRANSACTIONS
+  ACCOUNTING
+  REPORTS
+  USERS
+  ROLES
+  SETTINGS
+  WITHDRAWALS
+  LOAN_PRODUCTS
+  AUDIT_LOGS
+}
+
+model Permission {
+  id        Int                 @id @default(autoincrement())
+  resource  PermissionResource
+  action    PermissionAction
+  description String?
+  rolePermissions RolePermission[]
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+
+  @@unique([resource, action])
+  @@index([resource])
+}
+
+model Role {
+  id          Int               @id @default(autoincrement())
+  name        String            @unique
+  description String?
+  isActive    Boolean           @default(true)
+  permissions RolePermission[]
+  users       User[]
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@index([isActive])
+}
+
+model RolePermission {
+  id           Int        @id @default(autoincrement())
+  roleId       Int
+  permissionId Int
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  createdAt    DateTime   @default(now())
+
+  @@unique([roleId, permissionId])
+  @@index([roleId])
+  @@index([permissionId])
+}
+
+model SystemConfiguration {
+  id                    Int       @id @default(autoincrement())
+  organizationName      String    @default("Microfinance Institution")
+  organizationLogo      String?   // URL to logo image
+  currency              String    @default("ETB")
+  fiscalYearStart       String    @default("01-01")
+  maxLoanAmount         Decimal   @default(100000)
+  minSavingsPercentage  Int       @default(30)
+  interestCalculationMethod String @default("SIMPLE")
+  loanApprovalLevels    String    @default("ACCOUNTANT,SUPERVISOR,MANAGER") // Comma-separated
+  withdrawalApprovalLevels String @default("ACCOUNTANT,SUPERVISOR,MANAGER") // Comma-separated
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
 }

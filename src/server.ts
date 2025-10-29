@@ -1,3 +1,4 @@
+import path from "path";
 import express from "express";
 import http from "http";
 import cors from "cors";
@@ -26,6 +27,8 @@ app.use(
 
 app.use(express.json());
 app.use(cookieParser());
+
+app.use(express.static(path.join(__dirname, "../public")));
 
 app.get("/health-check", (req, res) => {
 	res.json({ message: "Server is running" });

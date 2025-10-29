@@ -17,6 +17,7 @@ import withdrawalsRouter from "./controllers/withdrawals.controller";
 import accountingRouter from "./controllers/accounting.controller";
 import analyticsRouter from "./controllers/analytics.controller";
 import settingsRouter from "./controllers/settings.controller";
+import permissionRouter from "./controllers/permissions.controller";
 // import reportRouter from './controllers/report.controller';
 // import salaryRouter from './controllers/importSalary.controller';
 const router = Router();
@@ -31,6 +32,7 @@ router.use("/withdrawals", withdrawalsRouter);
 router.use("/accounting", accountingRouter);
 router.use("/analytics", analyticsRouter);
 router.use("/settings", settingsRouter);
+router.use("/permissions", permissionRouter);
 
 // router.use('/report', reportRouter);
 // router.use('/importSalary', salaryRouter);

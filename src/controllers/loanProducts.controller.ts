@@ -94,7 +94,7 @@ loanProductsRouter.get("/:id", async (req, res) => {
 // Create new loan product (Admin only)
 loanProductsRouter.post("/", async (req, res) => {
 	const session = await getSession(req);
-	if (!session || session.role !== UserRole.MANAGER) {
+	if (!session || session.role !== UserRole.COMMITTEE) {
 		return res
 			.status(401)
 			.json({ error: "Unauthorized - Manager access required" });
