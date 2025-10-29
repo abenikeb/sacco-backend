@@ -204,10 +204,11 @@ withdrawalsRouter.get("/pending/:role", async (req: Request, res: Response) => {
 	}
 });
 
-router.post("/approve/:id", async (req: Request, res: Response) => {
+withdrawalsRouter.post("/approve/:id", async (req: Request, res: Response) => {
 	try {
 		const { id } = req.params;
-		const { approvedByUserId, approvalLevel, remarks } = req.body;
+		const { approvedByUserId, approvalLevel, remarks } = req.body.data;
+		console.log({body:req.body})
 
 		// Validate input
 		if (!approvedByUserId || !approvalLevel) {

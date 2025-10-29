@@ -9,12 +9,12 @@ export class AccountingService {
 		const standardAccounts = [
 			// ASSETS
 			{ code: "1010", name: "Cash", type: "ASSET" },
-			{ code: "1002", name: "Bank Account", type: "ASSET" },
+			{ code: "1020", name: "Bank Account", type: "ASSET" },
 			{ code: "1030", name: "Loan Receivable", type: "ASSET" },
 			{ code: "1040", name: "Member Deposits", type: "ASSET" },
 
 			// LIABILITIES
-			{ code: "2001", name: "Member Savings Deposits", type: "LIABILITY" },
+			{ code: "2010", name: "Member Savings Deposits", type: "LIABILITY" },
 			{ code: "2020", name: "Loan Payable", type: "LIABILITY" },
 			{ code: "2030", name: "Interest Payable", type: "LIABILITY" },
 
@@ -153,13 +153,13 @@ export class AccountingService {
 			reference,
 			lines: [
 				{
-					accountCode: "1002", // Bank Account (Debit)
+					accountCode: "1020", // Bank Account (Debit)
 					debit: amount,
 					credit: 0,
 					description: "Cash received",
 				},
 				{
-					accountCode: "2001", // Member Savings Deposits (Credit)
+					accountCode: "2010", // Member Savings Deposits (Credit)
 					debit: 0,
 					credit: amount,
 					description: "Member savings liability",
@@ -189,7 +189,7 @@ export class AccountingService {
 					description: "Loan given to member",
 				},
 				{
-					accountCode: "1002", // Bank Account (Credit)
+					accountCode: "1020", // Bank Account (Credit)
 					debit: 0,
 					credit: loanAmount,
 					description: "Cash paid out",
@@ -214,7 +214,7 @@ export class AccountingService {
 			reference,
 			lines: [
 				{
-					accountCode: "1002", // Bank Account (Debit)
+					accountCode: "1020", // Bank Account (Debit)
 					debit: principalAmount + interestAmount,
 					credit: 0,
 					description: "Cash received",
@@ -250,7 +250,7 @@ export class AccountingService {
 			reference,
 			lines: [
 				{
-					accountCode: "1002", // Bank Account (Debit)
+					accountCode: "1020", // Bank Account (Debit)
 					debit: feeAmount,
 					credit: 0,
 					description: "Cash received",

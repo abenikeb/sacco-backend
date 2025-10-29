@@ -93,6 +93,7 @@ export const fetchMembers = async (req, res) => {
 				(t) => t.type === "LOAN_REPAYMENT"
 			);
 
+
 			const totalContributions =
 				(savingsTransaction ? Number(savingsTransaction.amount) : 0) +
 				(membershipFeeTransaction
@@ -111,10 +112,14 @@ export const fetchMembers = async (req, res) => {
 			// 	(loanRepaymentTransaction
 			// 		? Number(loanRepaymentTransaction.amount)
 			// 		: 0);
+			// const loanRepayments =
+			// 	member.loans
+			// 		?.flatMap((loan) => loan.loanRepayments)
+			// 		.reduce((sum, repayment) => sum + Number(repayment.amount), 0) ?? 0;
 			const loanRepayments =
-				member.loans
-					?.flatMap((loan) => loan.loanRepayments)
-					.reduce((sum, repayment) => sum + Number(repayment.amount), 0) ?? 0;
+				loanRepaymentTransaction
+						? Number(loanRepaymentTransaction.amount)
+						: 0
 
 			return {
 				id: member.id,
