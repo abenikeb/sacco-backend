@@ -17,6 +17,8 @@ import { calculateLoan } from "../utils/calculate";
 import mime from "mime-types";
 import { getContentType } from "../utils/getContentType";
 import { createLoanRepayments } from "../utils/calculateLoanRepayment";
+import { AccountingService } from "./../services/accountingService";
+const accountingService = new AccountingService();
 
 const loansRouter = express.Router();
 const APPROVAL_HIERARCHY: UserRole[] = [
@@ -25,6 +27,7 @@ const APPROVAL_HIERARCHY: UserRole[] = [
 	UserRole.MANAGER,
 	UserRole.COMMITTEE,
 ];
+
 const order = new Map<UserRole, number>([
 	[UserRole.ACCOUNTANT, 0],
 	[UserRole.SUPERVISOR, 1],
@@ -160,6 +163,113 @@ function calculateMonthlyPayment(
 		(principal * monthlyRate * Math.pow(1 + monthlyRate, months)) /
 		(Math.pow(1 + monthlyRate, months) - 1)
 	);
+}
+
+async function handleLoanRepayment(
+	prismaTx,
+	memberId,
+	repaymentAmount,
+	repaymentDate,
+	sourceType,
+	reference
+) {
+	console.log("Handling loan repayment:", {
+		memberId,
+		repaymentAmount,
+		repaymentDate,
+		sourceType,
+		reference,
+	});
+
+	const activeLoan = await prismaTx.loan.findFirst({
+		where: { memberId, status: LoanApprovalStatus.DISBURSED },
+		include: {
+			loanRepayments: {
+				orderBy: { repaymentDate: "asc" },
+				where: { status: "PENDING" },
+			},
+		},
+		orderBy: { createdAt: "desc" },
+	});
+
+	console.log("Active loan found:", activeLoan);
+
+	if (!activeLoan) return;
+
+	let remaining = repaymentAmount;
+
+	for (const repayment of activeLoan.loanRepayments) {
+		if (remaining <= 0) break;
+		const unpaid = Number(repayment.amount) - Number(repayment.paidAmount);
+		if (unpaid <= 0) continue;
+
+		const apply = Math.min(remaining, unpaid);
+		const newPaid = Number(repayment.paidAmount) + apply;
+		const newStatus = newPaid >= Number(repayment.amount) ? "PAID" : "PENDING";
+
+		await prismaTx.loanRepayment.update({
+			where: { id: repayment.id },
+			data: { paidAmount: newPaid, repaymentDate, status: newStatus },
+		});
+
+		remaining -= apply;
+	}
+	console.log({
+		repaymentAmount,
+	});
+
+	if (repaymentAmount > 0) {
+		await prismaTx.transaction.create({
+			data: {
+				memberId,
+				type: TransactionType.LOAN_REPAYMENT,
+				amount: repaymentAmount,
+				transactionDate: repaymentDate,
+				reference,
+			},
+		});
+
+		const currentDate = new Date().toISOString().split("T")[0];
+		const interestRate = Number(activeLoan.interestRate) / 100;
+		const interestAmount = repaymentAmount * interestRate;
+		const principalAmount = repaymentAmount - interestAmount;
+
+		await accountingService.recordLoanRepayment(
+			memberId,
+			principalAmount,
+			interestAmount,
+			repaymentDate,
+			reference
+		);
+		// await createJournalEntry({
+		// 	type: mapToAccountingType(TransactionType.LOAN_REPAYMENT),
+		// 	amount: repaymentAmount,
+		// 	interest: 50,
+		// 	date: currentDate,
+		// 	reference: `${TransactionType.LOAN_REPAYMENT}-${memberId}-${repaymentDate.toISOString()}`,
+		// 	journalId: 3,
+		// });
+	}
+
+	// Update remaining loan balance
+	const totalRepaid =
+		(
+			await prismaTx.loanRepayment.aggregate({
+				where: { loanId: activeLoan.id },
+				_sum: { paidAmount: true },
+			})
+		)._sum.paidAmount || 0;
+
+	console.log("Total repaid so far:", totalRepaid);
+
+	const newRemaining = Number(activeLoan.amount) - Number(totalRepaid);
+	await prismaTx.loan.update({
+		where: { id: activeLoan.id },
+		data: {
+			remainingAmount: newRemaining,
+			...(newRemaining <= 0 && { status: LoanApprovalStatus.REPAID }),
+		},
+	});
 }
 
 loansRouter.get("/", async (req, res) => {
@@ -353,8 +463,7 @@ loansRouter.get("/disbursed", async (req, res) => {
 	try {
 		const disbursedLoans = await prisma.loan.findMany({
 			where: {
-				// status: "DISBURSED",  temporary workaround
-				status: "APPROVED",
+				status: "DISBURSED",
 				order: 3,
 			},
 			include: {
@@ -382,6 +491,70 @@ loansRouter.get("/disbursed", async (req, res) => {
 	} catch (error) {
 		console.error("Error fetching disbursed loans:", error);
 		return res.status(500).json({ error: "Failed to fetch disbursed loans" });
+	}
+});
+
+loansRouter.post("/:loanId/repayments/:repaymentId/pay", async (req, res) => {
+	const session = await getSession(req);
+	if (!session || session.role === "MEMBER") {
+		return res.status(401).json({ error: "Unauthorized" });
+	}
+	const { loanId, repaymentId } = req.params;
+	const { amount, reference, sourceType, memberId } = req.body;
+
+	try {
+		if (!memberId) {
+			return res
+				.status(400)
+				.json({ error: "Member ID is required for repayment." });
+		}
+
+		const repaymentAmount = Number(amount);
+		if (isNaN(repaymentAmount) || repaymentAmount <= 0) {
+			return res
+				.status(400)
+				.json({ error: "Invalid repayment amount provided." });
+		}
+
+		if (!reference || reference.trim() === "") {
+			return res
+				.status(400)
+				.json({ error: "Reference is required for repayment." });
+		}
+
+		const repaymentDate = new Date();
+
+		const result = await prisma.$transaction(async (prismaTx) => {
+			await handleLoanRepayment(
+				prismaTx,
+				memberId,
+				repaymentAmount,
+				repaymentDate,
+				sourceType,
+				reference
+			);
+
+			// Return updated repayment details for response clarity
+			const updatedRepayment = await prismaTx.loanRepayment.findUnique({
+				where: { id: Number(repaymentId) },
+				include: {
+					loan: true,
+				},
+			});
+
+			return updatedRepayment;
+		});
+
+		return res.json({
+			message: "Loan repayment processed successfully.",
+			data: result,
+		});
+	} catch (error) {
+		console.error("Error processing loan repayment:", error);
+		return res.status(500).json({
+			error: "Failed to process loan repayment.",
+			details: error.message,
+		});
 	}
 });
 
@@ -580,243 +753,6 @@ loansRouter.post("/apply", upload.single("agreement"), async (req, res) => {
 		return res
 			.status(500)
 			.json({ error: "Failed to process loan application" });
-	}
-});
-
-// loansRouter.post("/apply", upload.single("agreement"), async (req, res) => {
-// 	const session = await getSession(req);
-
-// 	if (!session || session.role !== "MEMBER") {
-// 		return res.status(401).json({ error: "Unauthorized" });
-// 	}
-
-// 	try {
-// 		const {
-// 			amount,
-// 			interestRate,
-// 			tenureMonths,
-// 			purpose,
-// 			coSigner1,
-// 			coSigner2,
-// 		} = req.body;
-// 		const agreement = req.file;
-
-// 		if (!amount || !interestRate || !tenureMonths || !purpose || !agreement) {
-// 			return res.status(400).json({ error: "Missing required fields" });
-// 		}
-
-// 		const loanAmount = Number.parseFloat(amount);
-// 		const rate = Number.parseFloat(interestRate);
-// 		const tenure = Number.parseInt(tenureMonths, 10);
-
-// 		if (rate !== 9.5) {
-// 			return res
-// 				.status(400)
-// 				.json({ error: "Interest rate must be 9.5% per annum" });
-// 		}
-
-// 		if (tenure > 120) {
-// 			return res
-// 				.status(400)
-// 				.json({ error: "Loan tenure cannot exceed 120 months (10 years)" });
-// 		}
-
-// 		const member = await prisma.member.findUnique({
-// 			where: { id: session.id! },
-// 			include: {
-// 				loans: {
-// 					where: {
-// 						status: {
-// 							in: ["PENDING", "APPROVED", "DISBURSED"],
-// 						},
-// 					},
-// 				},
-// 			},
-// 		});
-
-// 		if (!member) {
-// 			return res.status(404).json({ error: "Member not found" });
-// 		}
-
-// 		const totalSavings = await calculateTotalSavings(member.id);
-// 		const totalContributions = await calculateTotalContributions(member.id);
-// 		const monthlySalary = member.salary || 0;
-
-// 		const activeLoanBalance = await getActiveLoanBalance(member.id);
-// 		const hasActiveLoan = activeLoanBalance !== null;
-
-// 		if (tenure > 120) {
-// 			return res.status(400).json({
-// 				error: "Loan tenure cannot exceed 120 months (10 years)",
-// 				requirement: "Max Loan Term",
-// 			});
-// 		}
-
-// 		const maxLoanBasedOnSalary = monthlySalary * 30;
-// 		if (loanAmount > maxLoanBasedOnSalary) {
-// 			return res.status(400).json({
-// 				error: `Loan amount exceeds maximum limit based on salary. Maximum: ${maxLoanBasedOnSalary.toLocaleString()} ETB (30 months of salary)`,
-// 				requirement: "Loan Limit Based on Salary",
-// 				maxAllowed: maxLoanBasedOnSalary,
-// 			});
-// 		}
-
-// 		const requiredSavingsBeforeLoan = loanAmount * 0.3;
-// 		if (totalSavings < requiredSavingsBeforeLoan) {
-// 			return res.status(400).json({
-// 				error: `Insufficient savings. Required: ${requiredSavingsBeforeLoan.toLocaleString()} ETB (30% of loan amount), Available: ${totalSavings.toLocaleString()} ETB`,
-// 				requirement: "Savings Requirement Before Loan Approval",
-// 				required: requiredSavingsBeforeLoan,
-// 				available: totalSavings,
-// 			});
-// 		}
-
-// 		if (hasActiveLoan) {
-// 			const requiredMonthlySavings = monthlySalary * 0.35;
-// 			// Note: This is a validation that the member must continue saving 35% during active loan
-// 			// The actual enforcement happens during repayment tracking
-// 			if (monthlySalary === 0) {
-// 				return res.status(400).json({
-// 					error:
-// 						"Cannot apply for additional loan without valid salary information",
-// 					requirement: "Active Loan Savings Requirement",
-// 				});
-// 			}
-// 		}
-
-// 		if (hasActiveLoan) {
-// 			return res.status(400).json({
-// 				error: `You have an active loan with remaining balance of ${activeLoanBalance!.remainingBalance.toLocaleString()} ETB. Please repay the existing loan before applying for a new one.`,
-// 				requirement: "Active Loan Balance Tracking",
-// 				activeLoan: activeLoanBalance,
-// 			});
-// 		}
-
-// 		const fileExtension = path.extname(agreement.originalname);
-// 		const fileName = `loan_agreement_${Date.now()}_${member.id}${fileExtension}`;
-// 		const uploadDir = path.join(process.cwd(), "public", "loan_agreements");
-// 		const filePath = path.join(uploadDir, fileName);
-
-// 		try {
-// 			await mkdir(uploadDir, { recursive: true });
-// 		} catch (err) {
-// 			if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
-// 				throw err;
-// 			}
-// 		}
-
-// 		await writeFile(filePath, agreement.buffer);
-// 		const documentUrl = `/loan_agreements/${fileName}`;
-
-// 		const loan = await prisma.loan.create({
-// 			data: {
-// 				memberId: member.id,
-// 				amount: loanAmount,
-// 				remainingAmount: loanAmount,
-// 				interestRate: rate,
-// 				tenureMonths: tenure,
-// 				status: "PENDING",
-// 				loanDocuments: {
-// 					create: {
-// 						documentType: "AGREEMENT",
-// 						documentContent: agreement.buffer,
-// 						uploadedByUserId: Number(process.env.ADMIN_ID || 1),
-// 						fileName: fileName,
-// 						mimeType: agreement.mimetype,
-// 						documentUrl: documentUrl,
-// 					} as any,
-// 				},
-// 				approvalLogs: {
-// 					create: {
-// 						role: "MEMBER" as UserRole,
-// 						status: "PENDING",
-// 						approvedByUserId: Number(process.env.ADMIN_ID),
-// 						approvalOrder: 0,
-// 						comments: `Loan application submitted. Amount: ${loanAmount.toLocaleString()} ETB. Purpose: ${purpose}. Co-signers: ${
-// 							coSigner1 ? `ID:${coSigner1}` : "None"
-// 						}, ${coSigner2 ? `ID:${coSigner2}` : "None"}. Savings: ${totalSavings.toLocaleString()} ETB. Monthly Salary: ${monthlySalary.toLocaleString()} ETB`,
-// 					} as any,
-// 				},
-// 			},
-// 		});
-
-// 		if (!loan) throw Error("Failed to create loan");
-
-// 		const firstApproverId = await getFirstApproverUserId();
-// 		if (firstApproverId) {
-// 			await sendNotification({
-// 				userId: firstApproverId,
-// 				title: "New Loan Application Pending Review",
-// 				message: `New loan application (ID: ${loan.id}) for ${loanAmount.toLocaleString()} ETB submitted by ${member.name}. Savings: ${totalSavings.toLocaleString()} ETB (${((totalSavings / loanAmount) * 100).toFixed(1)}% of loan amount). Awaiting your review.`,
-// 				type: "LOAN_APPLICATION_SUBMITTED",
-// 			});
-// 		}
-
-// 		// await prisma.notification.create({
-// 		// 	data: {
-// 		// 		userId: Number(process.env.ADMIN_ID || 1),
-// 		// 		title: "New Loan Application",
-// 		// 		message: `New loan application for ${loanAmount.toLocaleString()} ETB submitted by ${member.name}. Savings: ${totalSavings.toLocaleString()} ETB (${((totalSavings / loanAmount) * 100).toFixed(1)}% of loan amount)`,
-// 		// 		type: "LOAN_APPLICATION_SUBMITTED",
-// 		// 	} as any,
-// 		// });
-
-// 		return res.json({
-// 			success: true,
-// 			loanId: loan.id,
-// 			documentUrl: documentUrl,
-// 			message: "Loan application submitted successfully",
-// 			loanDetails: {
-// 				amount: loanAmount,
-// 				interestRate: rate,
-// 				tenureMonths: tenure,
-// 				monthlyPayment: calculateMonthlyPayment(loanAmount, rate, tenure),
-// 			},
-// 		});
-// 	} catch (error) {
-// 		console.error("Error processing loan application:", error);
-// 		return res
-// 			.status(500)
-// 			.json({ error: "Failed to process loan application" });
-// 	}
-// });
-
-loansRouter.get("/disbursed", async (req, res) => {
-	const session = await getSession(req);
-	if (!session || session.role === "MEMBER") {
-		return res.status(401).json({ error: "Unauthorized" });
-	}
-
-	try {
-		const disbursedLoans = await prisma.loan.findMany({
-			where: {
-				status: "DISBURSED",
-			},
-			include: {
-				member: {
-					select: {
-						name: true,
-						etNumber: true,
-					},
-				},
-				loanRepayments: {
-					select: {
-						id: true,
-						amount: true,
-						repaymentDate: true,
-						status: true,
-					},
-				},
-			},
-			orderBy: {
-				createdAt: "desc",
-			},
-		});
-
-		return res.json(disbursedLoans);
-	} catch (error) {
-		console.error("Error fetching disbursed loans:", error);
-		return res.status(500).json({ error: "Failed to fetch disbursed loans" });
 	}
 });
 
@@ -1272,191 +1208,6 @@ loansRouter.post("/approve/:id", async (req, res) => {
 		return res.status(500).json({ error: "Failed to process loan approval" });
 	}
 });
-
-// loansRouter.post("/approve/:id", async (req, res) => {
-// 	const id = req.params.id;
-// 	const session = await getSession(req);
-// 	if (!session || session.role === "MEMBER")
-// 		return res.status(401).json({ error: "Unauthorized" });
-// 	const userRole = session.role!;
-// 	const { status, comment } = req.body;
-// 	try {
-// 		const loan = await prisma.loan.findUnique({
-// 			where: { id: Number.parseInt(id) },
-// 			include: { member: true },
-// 		});
-
-// 		if (!loan) return res.status(404).json({ error: "Loan not found" });
-// 		if (status == "REJECTED") {
-// 			await prisma.loan.update({
-// 				where: { id: loan.id },
-// 				data: {
-// 					order: -1,
-// 					status: "REJECTED",
-// 					approvalLogs: {
-// 						create: {
-// 							approvedByUserId: session.id!,
-// 							role: userRole as UserRole,
-// 							status: "REJECTED",
-// 							approvalOrder: -1,
-// 							comments: "Loan rejected by admin",
-// 						},
-// 					},
-// 				},
-// 			});
-// 			// await sendNotification({
-// 			// 	userId: loan.memberId,
-// 			// 	title: "Loan Rejected",
-// 			// 	message: `Loan (ID: ${loan.id}) was rejected because of the following reason \n ${comment}`,
-// 			// 	type: "LOAN_APPROVAL_UPDATE",
-// 			// });
-// 			await sendNotification({
-// 				userId: loan.memberId,
-// 				title: "Loan Application Rejected",
-// 				message: `Your loan application (ID: ${loan.id}) for ${loan.amount.toLocaleString()} ETB has been rejected. Reason: ${comment || "No reason provided"}`,
-// 				type: "LOAN_APPROVAL_UPDATE",
-// 			});
-// 			return;
-// 		}
-// 		if (status === "APPROVED") {
-// 			const currentRoleIndex = APPROVAL_HIERARCHY.indexOf(
-// 				session.role as UserRole
-// 			);
-// 			const loanApprovals = await prisma.loanApprovalLog.findMany({
-// 				where: { loanId: loan.id },
-// 				orderBy: { approvalOrder: "asc" },
-// 			});
-// 			for (let i = 0; i < currentRoleIndex; i++) {
-// 				const role = APPROVAL_HIERARCHY[i];
-// 				if (!loanApprovals.find((log) => log.role === role)) {
-// 					console.log("this here is the issue");
-// 					return res.status(400).json({
-// 						error: `${role} must approve the loan before ${session.role}`,
-// 					});
-// 				}
-// 			}
-
-// 			if (session.role !== UserRole.COMMITTEE) {
-// 				if (loanApprovals.some((log) => log.role === session.role)) {
-// 					return res
-// 						.status(400)
-// 						.json({ error: `${session.role} has already approved this loan.` });
-// 				}
-// 				const updatedLoan = await prisma.loan.update({
-// 					where: { id: loan.id },
-// 					data: {
-// 						order: { increment: 1 },
-// 						status: "PENDING",
-// 						approvalLogs: {
-// 							create: {
-// 								approvedByUserId: session.id!,
-// 								role: userRole as UserRole,
-// 								status: "APPROVED",
-// 								approvalOrder: currentRoleIndex + 1,
-// 								comments: "Loan was approved by admin",
-// 							},
-// 						},
-// 					},
-// 				});
-
-// 				await sendNotification({
-// 					userId: loan.memberId,
-// 					title: "Loan Approved and Disbursed",
-// 					message: `Your loan application (ID: ${loan.id}) for ${loan.amount.toLocaleString()} ETB has been approved and disbursed. Monthly payment: ${calculateMonthlyPayment(Number(loan.amount), Number(loan.interestRate), loan.tenureMonths).toLocaleString()} ETB`,
-// 					type: "LOAN_STATUS_UPDATE",
-// 				});
-
-// 				// await sendNotification({
-// 				// 	userId: session.id!,
-// 				// 	title: "Loan has been successfully disbursed",
-// 				// 	message: `Loan ID ${loan.id} has been disbursed`,
-// 				// 	type: "LOAN_STATUS_UPDATE",
-// 				// });
-
-// 				return res.json({
-// 					success: true,
-// 					message: `Loan ${status === "REJECTED" ? "rejected" : "approved"} successfully.`,
-// 					loan: updatedLoan,
-// 				});
-// 			}
-
-// 			// If not yet final approval, add committee approval and wait for next committee member
-
-// 			const lastApproved = loanApprovals[loanApprovals.length - 1]!;
-
-// 			if (lastApproved?.committeeApproval >= MIN_COMMITTEE_APPROVAL - 1) {
-// 				const updatedLoan = await prisma.loan.update({
-// 					where: {
-// 						id: loan.id,
-// 					},
-// 					data: {
-// 						status: "DISBURSED",
-// 						approvalLogs: {
-// 							create: {
-// 								approvedByUserId: session.id!,
-// 								role: userRole as UserRole,
-// 								status: "DISBURSED",
-// 								approvalOrder: currentRoleIndex,
-// 								comments: "Loan disbursed by committee",
-// 							},
-// 						},
-// 					},
-// 				});
-// 				// await sendNotification({
-// 				// 	userId: session.id!,
-// 				// 	title: "Loan has been successfully disbursed",
-// 				// 	message: `Loan ID ${loan.id} has been disbursed`,
-// 				// 	type: "LOAN_STATUS_UPDATE",
-// 				// });
-// 				const otherCommitteeMembers = await prisma.user.findMany({
-// 					where: {
-// 						role: UserRole.COMMITTEE,
-// 						id: { not: session.id! },
-// 					},
-// 				});
-// 				await sendNotification({
-// 					userId: otherCommitteeMembers[0].id,
-// 					title: "Loan Pending Committee Approval",
-// 					message: `Loan application (ID: ${loan.id}) for ${loan.amount.toLocaleString()} ETB is pending your committee approval. ${remainingApprovals} more approval(s) needed.`,
-// 					type: "LOAN_APPROVAL_UPDATE",
-// 				});
-// 				return res.json({
-// 					success: true,
-// 					message: `Loan DISBURSED successfully.`,
-// 					loan: updatedLoan,
-// 				});
-// 			}
-
-// 			const updatedLoan = await prisma.loan.update({
-// 				where: { id: loan.id },
-// 				data: {
-// 					status: "PENDING",
-// 					approvalLogs: {
-// 						create: {
-// 							approvedByUserId: session.id!,
-// 							role: userRole as UserRole,
-// 							status: "APPROVED",
-// 							approvalOrder: currentRoleIndex,
-// 							comments: "Loan approved by committee",
-// 							committeeApproval: lastApproved.committeeApproval + 1,
-// 						},
-// 					},
-// 				},
-// 			});
-
-// 			await createLoanRepayments(updatedLoan);
-
-// 			return res.json({
-// 				success: true,
-// 				message: `Loan ${status === "REJECTED" ? "rejected" : "approved"} successfully.`,
-// 				loan: updatedLoan,
-// 			});
-// 		}
-// 	} catch (error) {
-// 		console.error("Error approving loan:", error);
-// 		return res.status(500).json({ error: "Failed to process loan approval." });
-// 	}
-// });
 
 loansRouter.patch("/status/:id", async (req, res) => {
 	const id = req.params.id;

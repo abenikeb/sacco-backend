@@ -94,7 +94,7 @@ model Transaction {
   type            TransactionType
   journalEntries  JournalEntry[] 
   amount          Decimal
-  reference       String?
+  reference       String?         
   transactionDate DateTime        @default(now())
   member          Member          @relation(fields: [memberId], references: [id])
   createdAt       DateTime        @default(now())
@@ -189,7 +189,7 @@ model LoanRepayment {
   amount        Decimal             // scheduled repayment
   paidAmount    Decimal             @default(0) // total paid toward this scheduled repayment
   repaymentDate DateTime            @default(now())
-  reference     String?
+  reference     String?             @unique
   sourceType    RepaymentSourceType
   status        RepaymentStatus     @default(PENDING)
   loan          Loan                @relation(fields: [loanId], references: [id])
@@ -273,8 +273,6 @@ enum LoanApprovalStatus {
   REJECTED
   PENDING
 }
-
-
 
 enum RepaymentSourceType {
   ERP_PAYROLL

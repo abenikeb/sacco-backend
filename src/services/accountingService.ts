@@ -83,6 +83,7 @@ export class AccountingService {
 			const lastEntry = await tx.journalEntry.findFirst({
 				orderBy: { id: "desc" },
 			});
+
 			const entryNumber = `JE-${String((lastEntry?.id || 0) + 1).padStart(6, "0")}`;
 
 			// Create journal entry

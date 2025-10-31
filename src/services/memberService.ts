@@ -112,22 +112,6 @@ export class MemberService {
 							}
 						}
 					}
-					// if (txList.length > 0)
-					// 	await tx.transaction.createMany({ data: txList });
-
-					// // Create Journal Entries
-					// const currentDate = new Date().toISOString().split("T")[0];
-					// for (const t of txList) {
-					// 	await createJournalEntry({
-					// 		type: mapToAccountingType(t.type),
-					// 		amount: Number(t.amount),
-					// 		interest: 50,
-					// 		date: currentDate,
-					// 		reference: `REF-${t.type}-${member.name}-${currentDate}`,
-					// 		journalId: 3,
-					// 	});
-					// }
-
 					count++;
 				} catch (err) {
 					console.error(`❌ Failed to import member ${memberData.Name}:`, err);
