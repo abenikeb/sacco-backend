@@ -29,6 +29,11 @@ app.use(express.json());
 app.use(cookieParser());
 
 app.use(express.static(path.join(__dirname, "../public")));
+app.use("/uploads", express.static(path.join(__dirname, "../public/uploads")));
+
+// app.use(express.static(path.join(__dirname, "../public")));
+// app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
+
 
 app.get("/health-check", (req, res) => {
 	res.json({ message: "Server is running" });

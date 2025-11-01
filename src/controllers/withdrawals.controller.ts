@@ -182,9 +182,9 @@ withdrawalsRouter.get("/pending/:role", async (req: Request, res: Response) => {
 		};
 
 		const status = statusMap[role];
-		if (!status) {
-			return res.status(400).json({ error: "Invalid role" });
-		}
+		// if (!status) {
+		// 	return res.status(400).json({ error: "Invalid role" });
+		// }
 
 		const withdrawalRequests = await prisma.withdrawalRequest.findMany({
 			where: { approvalStatus: status } as any,
