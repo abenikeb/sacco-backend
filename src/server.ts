@@ -5,6 +5,8 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import { initializeSocket } from "@/src/utils/socket-handler";
 import apiRoutes from "./routes";
+import memberRoutes from "./routes/memberRoutes";
+
 const app = express();
 
 const server = http.createServer(app);
@@ -35,6 +37,7 @@ app.get("/health-check", (req, res) => {
 });
 
 app.use("/api", apiRoutes);
+app.use("/api-v1/members", memberRoutes);
 
 const PORT = process.env.PORT || 3000;
 
