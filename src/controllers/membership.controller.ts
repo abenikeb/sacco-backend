@@ -161,21 +161,6 @@ membershipRouter.patch("/requests/:id", async (req, res) => {
 					},
 				});
 
-				// await fetch("http://94.130.27.32:3001/send-sms", { // mock
-				// 	method: "POST",
-				// 	headers: {
-				// 		"Content-Type": "application/json",
-				// 	},
-				// 	body: JSON.stringify({
-				// 		to: membershipRequest.phone,
-				// 		message: `ውድ ${
-				// 			membershipRequest.name
-				// 		} በኢትዮ ክሬዲት አሶሴሽን በተሳካ ሁኔታ ተመዝገበዋል! የአባልነት ልዩ ቁጥር ${etNumber} : እንዲሁም ጊዚያዊ የማለፊያ ቂጥርዎ 'Test@123tr' ይህ ነው በተጨማሪም በ ${"http://94.130.27.32:3008"} መጎብኘት አገልግሎቱን መጠቀም ይችላሉ::`,
-				// 		callback: "https://your-callback-url.com/sms-status",
-				// 	}),
-				// });
-
-				// Return both the updated request and the new member
 				return res.json({
 					updatedRequest,
 					newMember,
